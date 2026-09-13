@@ -2570,6 +2570,7 @@ if __name__ == "__main__":
             modo_web = (
                 os.environ.get("JDS_WEB", "").lower() in {"1", "true", "yes"}
                 or bool(os.environ.get("RENDER"))
+                or bool(os.environ.get("RAILWAY_ENVIRONMENT"))
             )
             kwargs = {"target": main}
             if modo_web:

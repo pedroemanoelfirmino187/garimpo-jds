@@ -19,29 +19,32 @@ Testes do motor:
 python garimpo_jds.py --testar
 ```
 
-## 2. API no Render (buscas no servidor)
+## 2. API no Railway (GitHub)
 
-1. Crie um repositório Git com esta pasta e envie ao GitHub.
-2. No [Render](https://render.com): **New → Web Service** → conecte o repo.
-3. Build: `pip install -r requirements.txt`
-4. Start: `uvicorn api.main:app --host 0.0.0.0 --port $PORT`
-5. Plano **Starter** (o gratuito dorme e a busca parece quebrada).
-6. Teste no navegador: `https://SEU-SERVICO.onrender.com/health`  
-   Busca: `https://SEU-SERVICO.onrender.com/garimpar?q=controle%20ps5`
+Repo: https://github.com/pedroemanoelfirmino187/garimpo-jds
+
+1. No Railway: **New → GitHub Repo** → `garimpo-jds`.
+2. Start command (já no `railway.toml` / `Procfile`):  
+   `uvicorn api.main:app --host 0.0.0.0 --port $PORT`
+3. Generate Domain no serviço.
+4. Teste: `https://SEU-DOMINIO.up.railway.app/health`  
+   Busca: `https://SEU-DOMINIO.up.railway.app/garimpar?q=controle%20ps5`
+
+Se o deploy falhar, no serviço Railway confira o Start Command (não use `python garimpo_jds.py` — isso abre o Flet, não a API).
 
 ## 3. App apontando para a API
 
-No Render (Environment) ou no arquivo `.env` local:
+No Railway (Variables) ou no `.env` local:
 
 ```text
-JDS_API_URL=https://SEU-SERVICO.onrender.com
+JDS_API_URL=https://SEU-DOMINIO.up.railway.app
 ```
 
 Aí o Flet só pede o produto; o servidor garimpa.
 
 ## 4. Site Flet no ar (opcional)
 
-Segundo Web Service no Render, mesmo repo:
+Segundo serviço no Railway, mesmo repo:
 
 - Start: `JDS_WEB=1 python garimpo_jds.py`
 - Variável `JDS_API_URL` = URL do serviço da API
@@ -49,7 +52,7 @@ Segundo Web Service no Render, mesmo repo:
 
 ## 5. Para ficar estável 24h
 
-Cadastre as APIs oficiais e cole as chaves no Render (nunca no código):
+Cadastre as APIs oficiais e cole as chaves no Railway (nunca no código):
 
 | Loja | Onde | Variáveis |
 |------|------|-----------|

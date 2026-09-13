@@ -1,4 +1,4 @@
-"""API de busca da JDS Economiza — deploy no Render."""
+"""API de busca da JDS Economiza — deploy no Railway."""
 from __future__ import annotations
 
 import os
