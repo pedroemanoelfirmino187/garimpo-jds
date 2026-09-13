@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+cache_garimpo.json
+debug_google.html
+.cursor/
