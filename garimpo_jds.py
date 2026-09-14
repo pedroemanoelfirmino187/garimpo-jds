@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import io
 import os
 import random
@@ -13,7 +15,7 @@ import urllib.request
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 try:
@@ -359,7 +361,11 @@ def _eh_pagina_compra(url, plat):
             or "produto.mercadolibre." in u
         )
     if plat == "shopee":
-        return "shopee.com.br/search" in u and "keyword=" in u
+        return (
+            ("shopee.com.br/search" in u and "keyword=" in u)
+            or "affiliate.shopee" in u
+            or "s.shopee.com.br" in u
+        )
     return False
 
 
@@ -1347,7 +1353,7 @@ def _gravar_cache_garimpo(termo, produtos):
 
 
 def _buscar_ofertas_ml_api(termo, limite=8):
-    """API oficial do Mercado Livre — título, preço, foto e permalink da compra."""
+    """API do Mercado Livre — título, preço, foto e permalink da compra."""
     if requests is None or not (termo or "").strip():
         return []
     q = urllib.parse.quote(termo.strip())
@@ -1357,15 +1363,14 @@ def _buscar_ofertas_ml_api(termo, limite=8):
     )
     resultados = []
     headers = {
-        **HEADERS_GOOGLE,
+        "User-Agent": "JDSEconomiza/1.0 (garimpo; +https://github.com/pedroemanoelfirmino187/garimpo-jds)",
         "Accept": "application/json",
-        "Referer": "https://www.mercadolivre.com.br/",
-        "Origin": "https://www.mercadolivre.com.br",
     }
+    token = (os.environ.get("MELI_ACCESS_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     try:
-        if requests is None:
-            return []
-        resp = requests.get(url, timeout=5, headers=headers)
+        resp = requests.get(url, timeout=12, headers=headers)
         if resp.status_code >= 400:
             print(f"[ML API] HTTP {resp.status_code}")
             return []
@@ -1531,13 +1536,185 @@ def _buscar_ofertas_shopee_api(termo, limite=6):
     return ofertas
 
 
-def _coletar_ofertas_ao_vivo(termo):
-    """Consulta ML, Amazon e Shopee em paralelo para qualquer produto."""
+def _assinatura_aws_paapi(secret, data_stamp, region, service):
+    k_date = hmac.new(("AWS4" + secret).encode("utf-8"), data_stamp.encode("utf-8"), hashlib.sha256).digest()
+    k_region = hmac.new(k_date, region.encode("utf-8"), hashlib.sha256).digest()
+    k_service = hmac.new(k_region, service.encode("utf-8"), hashlib.sha256).digest()
+    return hmac.new(k_service, b"aws4_request", hashlib.sha256).digest()
+
+
+def _buscar_ofertas_amazon_paapi(termo, limite=8):
+    """Amazon Product Advertising API 5 — só roda com AMAZON_ACCESS_KEY + SECRET."""
+    access = (os.environ.get("AMAZON_ACCESS_KEY") or "").strip()
+    secret = (os.environ.get("AMAZON_SECRET_KEY") or "").strip()
+    tag = (os.environ.get("AMAZON_PARTNER_TAG") or ID_AMAZON).strip() or ID_AMAZON
+    if requests is None or not access or not secret or not (termo or "").strip():
+        return []
+    host = "webservices.amazon.com.br"
+    region = "us-east-1"
+    service = "ProductAdvertisingAPI"
+    path = "/paapi5/searchitems"
+    amz_target = "com.amazon.paapi5.v1.ProductAdvertisingAPIv1.SearchItems"
+    payload = json.dumps({
+        "Keywords": termo.strip(),
+        "PartnerTag": tag,
+        "PartnerType": "Associates",
+        "Marketplace": "www.amazon.com.br",
+        "SearchIndex": "All",
+        "ItemCount": min(10, max(1, limite)),
+        "Resources": [
+            "Images.Primary.Large",
+            "ItemInfo.Title",
+            "Offers.Listings.Price",
+        ],
+    }, ensure_ascii=False, separators=(",", ":"))
+    now = datetime.now(timezone.utc)
+    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = now.strftime("%Y%m%d")
+    payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    content_type = "application/json; charset=utf-8"
+    signed_headers = "content-encoding;content-type;host;x-amz-date;x-amz-target"
+    canonical = (
+        f"POST\n{path}\n\n"
+        f"content-encoding:amz-1.0\n"
+        f"content-type:{content_type}\n"
+        f"host:{host}\n"
+        f"x-amz-date:{amz_date}\n"
+        f"x-amz-target:{amz_target}\n"
+        f"\n{signed_headers}\n{payload_hash}"
+    )
+    scope = f"{date_stamp}/{region}/{service}/aws4_request"
+    string_to_sign = (
+        "AWS4-HMAC-SHA256\n"
+        f"{amz_date}\n{scope}\n"
+        f"{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+    )
+    signing_key = _assinatura_aws_paapi(secret, date_stamp, region, service)
+    signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    headers = {
+        "content-encoding": "amz-1.0",
+        "content-type": content_type,
+        "host": host,
+        "x-amz-date": amz_date,
+        "x-amz-target": amz_target,
+        "Authorization": (
+            f"AWS4-HMAC-SHA256 Credential={access}/{scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        ),
+    }
+    try:
+        resp = requests.post(
+            f"https://{host}{path}",
+            data=payload.encode("utf-8"),
+            headers=headers,
+            timeout=12,
+        )
+        if resp.status_code >= 400:
+            print(f"[Amazon PA-API] HTTP {resp.status_code}")
+            return []
+        dados = resp.json() or {}
+        itens = ((dados.get("SearchResult") or {}).get("Items") or [])
+    except Exception as e:
+        print(f"[Amazon PA-API] {e}")
+        return []
+
     ofertas = []
+    for it in itens:
+        asin = (it.get("ASIN") or "").strip()
+        titulo = (((it.get("ItemInfo") or {}).get("Title") or {}).get("DisplayValue") or "").strip()
+        listings = ((it.get("Offers") or {}).get("Listings") or [])
+        preco = 0.0
+        if listings:
+            preco = float((((listings[0].get("Price") or {}).get("Amount")) or 0) or 0)
+        if not asin or not titulo or preco <= 0:
+            continue
+        if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo):
+            continue
+        foto = ((((it.get("Images") or {}).get("Primary") or {}).get("Large") or {}).get("URL") or "")
+        url = (it.get("DetailPageURL") or f"https://www.amazon.com.br/dp/{asin}")
+        item = _montar_item_oferta(titulo, preco, url, foto, "amazon")
+        item["fonte"] = "oficial"
+        if not _oferta_foto_preco_do_mesmo_item(item):
+            continue
+        ofertas.append(item)
+        if len(ofertas) >= limite:
+            break
+    return ofertas
+
+
+def _buscar_ofertas_shopee_afiliado(termo, limite=8):
+    """Shopee Affiliate Open API — só roda com SHOPEE_APP_ID + SHOPEE_SECRET."""
+    app_id = (os.environ.get("SHOPEE_APP_ID") or "").strip()
+    secret = (os.environ.get("SHOPEE_SECRET") or "").strip()
+    if requests is None or not app_id or not secret or not (termo or "").strip():
+        return []
+    kw = json.dumps(termo.strip(), ensure_ascii=False)
+    gql = (
+        "{ productOfferV2(keyword: %s, sortType: 4, page: 1, limit: %d) { nodes { "
+        "itemId productName offerLink productLink imageUrl priceMin } } }"
+    ) % (kw, min(20, max(1, limite)))
+    body = json.dumps({"query": gql}, ensure_ascii=False, separators=(",", ":"))
+    timestamp = str(int(time.time()))
+    assinatura = hashlib.sha256(f"{app_id}{timestamp}{body}{secret}".encode("utf-8")).hexdigest()
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": (
+            f"SHA256 Credential={app_id}, Timestamp={timestamp}, Signature={assinatura}"
+        ),
+    }
+    try:
+        resp = requests.post(
+            "https://open-api.affiliate.shopee.com.br/graphql",
+            data=body.encode("utf-8"),
+            headers=headers,
+            timeout=12,
+        )
+        if resp.status_code >= 400:
+            print(f"[Shopee Afiliado] HTTP {resp.status_code}")
+            return []
+        nodes = ((((resp.json() or {}).get("data") or {}).get("productOfferV2") or {}).get("nodes")) or []
+    except Exception as e:
+        print(f"[Shopee Afiliado] {e}")
+        return []
+
+    ofertas = []
+    for it in nodes:
+        titulo = (it.get("productName") or "").strip()
+        if not titulo:
+            continue
+        preco = _preco_para_numero(it.get("priceMin"))
+        if preco <= 0:
+            continue
+        if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo):
+            continue
+        url = (it.get("offerLink") or it.get("productLink") or "").strip()
+        if not url:
+            url = _link_busca_shopee(titulo)
+        foto = (it.get("imageUrl") or "").strip()
+        item = _montar_item_oferta(titulo, preco, url, foto, "shopee")
+        item["fonte"] = "oficial"
+        if not _oferta_foto_preco_do_mesmo_item(item):
+            continue
+        ofertas.append(item)
+        if len(ofertas) >= limite:
+            break
+    return ofertas
+
+
+def _coletar_ofertas_ao_vivo(termo):
+    """Consulta ML, Amazon e Shopee em paralelo (API oficial se houver chave)."""
+    ofertas = []
+
+    def _amazon():
+        return _buscar_ofertas_amazon_paapi(termo, 8) or _buscar_ofertas_amazon_html(termo, 6)
+
+    def _shopee():
+        return _buscar_ofertas_shopee_afiliado(termo, 8) or _buscar_ofertas_shopee_api(termo, 6)
+
     tarefas = (
         (_buscar_ofertas_ml_api, (termo, 12)),
-        (_buscar_ofertas_amazon_html, (termo, 6)),
-        (_buscar_ofertas_shopee_api, (termo, 6)),
+        (_amazon, ()),
+        (_shopee, ()),
     )
     with ThreadPoolExecutor(max_workers=3) as pool:
         futuros = [pool.submit(fn, *args) for fn, args in tarefas]
@@ -1664,7 +1841,7 @@ def gerar_lista_ofertas_reais(
 
     for item in _coletar_ofertas_ao_vivo(termo):
         plat = item.get("plataforma")
-        if plat in plats_ja:
+        if plat in plats_ja and item.get("fonte") != "oficial":
             continue
         antes = len(lista_produtos)
         _adicionar(item)

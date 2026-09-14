@@ -51,7 +51,7 @@ def health():
         "chaves": {
             "amazon_paapi": bool(os.environ.get("AMAZON_ACCESS_KEY")),
             "shopee_affiliate": bool(os.environ.get("SHOPEE_APP_ID")),
-            "mercadolivre": True,
+            "mercadolivre": bool(os.environ.get("MELI_ACCESS_TOKEN")),
         },
     }
 

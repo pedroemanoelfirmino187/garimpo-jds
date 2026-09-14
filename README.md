@@ -50,14 +50,16 @@ Segundo serviço no Railway, mesmo repo:
 - Variável `JDS_API_URL` = URL do serviço da API
 - Variável `JDS_WEB` = `1`
 
-## 5. Para ficar estável 24h
+## 5. Para o robô comparar as 3 lojas de verdade (obrigatório no Railway)
 
-Cadastre as APIs oficiais e cole as chaves no Railway (nunca no código):
+Scraping no servidor é bloqueado. Cole as chaves em **Railway → Variables** (nunca no GitHub):
 
-| Loja | Onde | Variáveis |
-|------|------|-----------|
-| Amazon | Associates + Product Advertising API | `AMAZON_ACCESS_KEY`, `AMAZON_SECRET_KEY` |
-| Shopee | Affiliate | `SHOPEE_APP_ID`, `SHOPEE_SECRET` |
-| Mercado Livre | developers.mercadolivre.com | já usa a search pública MLB |
+| Loja | Onde cadastrar | Variáveis |
+|------|----------------|-----------|
+| Amazon | [Associates](https://associados.amazon.com.br) → Product Advertising API | `AMAZON_ACCESS_KEY`, `AMAZON_SECRET_KEY`, `AMAZON_PARTNER_TAG=jdseconomiz0e-20` |
+| Shopee | [Afiliados](https://affiliate.shopee.com.br) → Open API | `SHOPEE_APP_ID`, `SHOPEE_SECRET` |
+| Mercado Livre | [developers.mercadolivre.com.br](https://developers.mercadolivre.com.br) | `MELI_ACCESS_TOKEN` |
 
-Sem essas chaves o servidor ainda busca, mas Amazon/Shopee podem bloquear. Com as chaves, o próximo passo é ligar PA-API e Shopee Affiliate no motor.
+Depois do deploy, `/health` tem que mostrar `amazon_paapi`, `shopee_affiliate` e `mercadolivre` como `true`.
+
+Sem essas chaves o servidor ainda busca, mas Amazon/Shopee/ML bloqueiam o IP do Railway.
