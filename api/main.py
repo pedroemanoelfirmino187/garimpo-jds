@@ -22,6 +22,7 @@ from garimpo_jds import (  # noqa: E402
     ID_AMAZON,
     ID_MERCADO_LIVRE,
     ID_SHOPEE,
+    _chaves_env,
     gerar_lista_ofertas_reais,
 )
 
@@ -52,6 +53,14 @@ def health():
             "amazon_paapi": bool(os.environ.get("AMAZON_ACCESS_KEY")),
             "shopee_affiliate": bool(os.environ.get("SHOPEE_APP_ID")),
             "mercadolivre": bool(os.environ.get("MELI_ACCESS_TOKEN")),
+            "zenrows": bool(_chaves_env("ZENROWS_API_KEY", "ZENROWS_KEY")),
+            "scrapingant": bool(_chaves_env(
+                "SCRAPINGANT_API_KEY",
+                "SCRAPING_ANT_KEY",
+                "SCRAPINGANT_KEY",
+                "SCRAPING_ANT_KEY_2",
+                "SCRAPINGANT_API_KEY_2",
+            )),
         },
     }
 

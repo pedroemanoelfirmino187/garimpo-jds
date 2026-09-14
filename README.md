@@ -59,7 +59,9 @@ Scraping no servidor é bloqueado. Cole as chaves em **Railway → Variables** (
 | Amazon | [Associates](https://associados.amazon.com.br) → Product Advertising API | `AMAZON_ACCESS_KEY`, `AMAZON_SECRET_KEY`, `AMAZON_PARTNER_TAG=jdseconomiz0e-20` |
 | Shopee | [Afiliados](https://affiliate.shopee.com.br) → Open API | `SHOPEE_APP_ID`, `SHOPEE_SECRET` |
 | Mercado Livre | [developers.mercadolivre.com.br](https://developers.mercadolivre.com.br) | `MELI_ACCESS_TOKEN` |
+| ZenRows (grátis) | [zenrows.com](https://www.zenrows.com) | `ZENROWS_API_KEY` |
+| ScrapingAnt (grátis) | [scrapingant.com](https://scrapingant.com) | `SCRAPINGANT_API_KEY` |
 
-Depois do deploy, `/health` tem que mostrar `amazon_paapi`, `shopee_affiliate` e `mercadolivre` como `true`.
+O motor tenta a loja direto; se bloquear, **ZenRows**; se falhar, **ScrapingAnt** (não gasta as duas na mesma página).
 
-Sem essas chaves o servidor ainda busca, mas Amazon/Shopee/ML bloqueiam o IP do Railway.
+Depois do deploy, `/health` mostra `zenrows` e `scrapingant` como `true` quando as chaves estão no Railway.

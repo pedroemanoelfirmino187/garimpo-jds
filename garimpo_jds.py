@@ -44,7 +44,10 @@ ID_SHOPEE = "18381751263"
 ID_MERCADO_LIVRE = "mape592520"
 CUPOM_JDS = "JDS10"
 CACHE_GARIMPO = Path(__file__).resolve().parent / "cache_garimpo.json"
+ARQ_DESEJOS = Path(__file__).resolve().parent / "desejos_jds.json"
+ARQ_PONTOS = Path(__file__).resolve().parent / "pontos_jds.json"
 CACHE_TTL_SEG = 6 * 3600
+INTERVALO_ALERTA_SEG = 15 * 60
 JDS_API_URL = (os.environ.get("JDS_API_URL") or "").strip().rstrip("/")
 FOTO_PADRAO = "https://images.unsplash.com/photo-1544816155-12df9643f363?w=600&auto=format&fit=crop&q=80"
 HEADERS_GOOGLE = {
@@ -57,9 +60,62 @@ HEADERS_GOOGLE = {
     "Connection": "keep-alive",
 }
 
-lista_desejos = []
-pontos_jds = {"saldo": 0, "checkin": ""}
+def _carregar_json(caminho, padrao):
+    try:
+        if caminho.exists():
+            dados = json.loads(caminho.read_text(encoding="utf-8"))
+            return dados if isinstance(dados, type(padrao)) else padrao
+    except Exception:
+        pass
+    return padrao
+
+
+def _gravar_json(caminho, dados):
+    try:
+        caminho.write_text(json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[JDS] não gravou {caminho.name}: {e}")
+
+
+def _item_desejo_gravavel(item):
+    return {
+        "titulo": item.get("titulo") or "",
+        "preco": item.get("preco") or "",
+        "preco_num": float(item.get("preco_num") or 0),
+        "url": item.get("url") or "",
+        "foto": item.get("foto") or "",
+        "plataforma": item.get("plataforma") or "",
+        "loja": item.get("loja") or "",
+        "alerta": True,
+        "queda": bool(item.get("queda")),
+        "preco_anterior": item.get("preco_anterior") or "",
+    }
+
+
+lista_desejos = [
+    _item_desejo_gravavel(x)
+    for x in (_carregar_json(ARQ_DESEJOS, []) or [])
+    if isinstance(x, dict) and (x.get("url") or x.get("titulo"))
+]
+_pts = _carregar_json(ARQ_PONTOS, {"saldo": 0, "checkin": "", "roleta": ""})
+pontos_jds = {
+    "saldo": int(_pts.get("saldo") or 0),
+    "checkin": str(_pts.get("checkin") or ""),
+    "roleta": str(_pts.get("roleta") or ""),
+}
 achados_convertidos = []
+
+
+def _salvar_desejos():
+    _gravar_json(ARQ_DESEJOS, [_item_desejo_gravavel(x) for x in lista_desejos])
+
+
+def _salvar_pontos():
+    _gravar_json(ARQ_PONTOS, pontos_jds)
+
+
+def _url_chave(url):
+    return (url or "").split("?")[0].split("#")[0].rstrip("/").lower()
 
 
 def gerar_link_afiliado(url_original, plataforma):
@@ -1415,19 +1471,132 @@ def _buscar_ofertas_ml_api(termo, limite=8):
     return ofertas
 
 
+def _chaves_env(*nomes):
+    vistas = set()
+    valores = []
+    for nome in nomes:
+        v = (os.environ.get(nome) or "").strip()
+        if v and v not in vistas:
+            vistas.add(v)
+            valores.append(v)
+    return valores
+
+
+def _zenrows_baixar(url):
+    chaves = _chaves_env("ZENROWS_API_KEY", "ZENROWS_KEY")
+    if requests is None or not chaves:
+        return ""
+    for chave in chaves:
+        try:
+            resp = requests.get(
+                "https://api.zenrows.com/v1/",
+                params={
+                    "apikey": chave,
+                    "url": url,
+                    "mode": "auto",
+                    "proxy_country": "br",
+                },
+                timeout=28,
+            )
+            if resp.status_code >= 400 or not (resp.text or "").strip():
+                print(f"[ZenRows] HTTP {resp.status_code}")
+                continue
+            return resp.text
+        except Exception as e:
+            print(f"[ZenRows] {e}")
+    return ""
+
+
+def _scrapingant_baixar(url, browser=True):
+    chaves = _chaves_env(
+        "SCRAPINGANT_API_KEY",
+        "SCRAPING_ANT_KEY",
+        "SCRAPINGANT_KEY",
+        "SCRAPING_ANT_KEY_2",
+        "SCRAPINGANT_API_KEY_2",
+    )
+    if requests is None or not chaves:
+        return ""
+    for i, chave in enumerate(chaves, 1):
+        try:
+            resp = requests.get(
+                "https://api.scrapingant.com/v2/general",
+                params={
+                    "url": url,
+                    "x-api-key": chave,
+                    "browser": "true" if browser else "false",
+                    "proxy_country": "BR",
+                },
+                timeout=28,
+            )
+            if resp.status_code >= 400:
+                print(f"[ScrapingAnt] chave {i} HTTP {resp.status_code}")
+                continue
+            try:
+                dados = resp.json()
+            except Exception:
+                texto = resp.text or ""
+                if texto.strip():
+                    return texto
+                continue
+            if isinstance(dados, dict):
+                texto = dados.get("html") or dados.get("content") or dados.get("text") or ""
+            else:
+                texto = resp.text or ""
+            if texto.strip():
+                return texto
+        except Exception as e:
+            print(f"[ScrapingAnt] chave {i} {e}")
+    return ""
+
+
+def _pagina_bloqueada(texto):
+    t = (texto or "").lower()
+    if len(t) < 80:
+        return True
+    return any(p in t for p in (
+        "api-services-support@amazon.com",
+        "sorry, we just need to make sure you're not a robot",
+        "enter the characters you see below",
+    ))
+
+
+def _baixar_url_loja(url, headers=None, timeout=8, browser=False):
+    """Tenta direto; se bloquear, ZenRows; se falhar, ScrapingAnt (uma API por vez)."""
+    if requests is None:
+        return "", ""
+    try:
+        resp = requests.get(url, headers=headers or HEADERS_GOOGLE, timeout=timeout)
+        corpo = resp.text if resp.status_code < 400 else ""
+        if corpo and not _pagina_bloqueada(corpo):
+            return corpo, "direto"
+    except Exception as e:
+        print(f"[HTTP loja] {e}")
+    zen = _zenrows_baixar(url)
+    if zen and not _pagina_bloqueada(zen):
+        print("[Motor] página via ZenRows")
+        return zen, "zenrows"
+    ant = _scrapingant_baixar(url, browser=browser)
+    if ant and not _pagina_bloqueada(ant):
+        print("[Motor] página via ScrapingAnt")
+        return ant, "scrapingant"
+    return "", ""
+
+
+def _marcar_fonte_scrape(item, origem):
+    if origem in {"zenrows", "scrapingant"}:
+        item["fonte"] = "scrape"
+    return item
+
+
 def _buscar_ofertas_amazon_html(termo, limite=6):
     """Busca pública da Amazon BR: ASIN, preço, foto e página /dp/ de compra."""
     if requests is None or BeautifulSoup is None or not (termo or "").strip():
         return []
     q = urllib.parse.quote(termo.strip())
     url = f"https://www.amazon.com.br/s?k={q}"
-    try:
-        resp = requests.get(url, headers=HEADERS_GOOGLE, timeout=5)
-        if resp.status_code >= 400 or not resp.text:
-            return []
-        html = resp.text
-    except Exception as e:
-        print(f"[Amazon] {e}")
+    html, origem = _baixar_url_loja(url, headers=HEADERS_GOOGLE, timeout=6, browser=True)
+    if not html:
         return []
 
     soup = BeautifulSoup(html, "html.parser")
@@ -1467,6 +1636,7 @@ def _buscar_ofertas_amazon_html(termo, limite=6):
         item = _montar_item_oferta(
             titulo, preco, f"https://www.amazon.com.br/dp/{asin}", foto_hint, "amazon",
         )
+        _marcar_fonte_scrape(item, origem)
         if not _oferta_foto_preco_do_mesmo_item(item):
             continue
         vistos.add(asin)
@@ -1486,22 +1656,21 @@ def _buscar_ofertas_shopee_api(termo, limite=6):
         f"?by=price&limit={limite}&newest=0&order=asc"
         f"&page_type=search&scenario=PAGE_GLOBAL_SEARCH&version=2&keyword={q}"
     )
+    headers = {
+        **HEADERS_GOOGLE,
+        "Accept": "application/json",
+        "Referer": f"https://shopee.com.br/search?keyword={q}",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    bruto, origem = _baixar_url_loja(url, headers=headers, timeout=6, browser=False)
+    if not bruto:
+        return []
     try:
-        resp = requests.get(
-            url,
-            timeout=5,
-            headers={
-                **HEADERS_GOOGLE,
-                "Accept": "application/json",
-                "Referer": f"https://shopee.com.br/search?keyword={q}",
-                "X-Requested-With": "XMLHttpRequest",
-            },
-        )
-        if resp.status_code >= 400:
-            return []
-        payload = resp.json() or {}
-    except Exception as e:
-        print(f"[Shopee] {e}")
+        payload = json.loads(bruto)
+    except Exception:
+        print("[Shopee] resposta não é JSON")
+        return []
+    if not isinstance(payload, dict):
         return []
 
     itens = payload.get("items") or []
@@ -1524,10 +1693,10 @@ def _buscar_ofertas_shopee_api(termo, limite=6):
             continue
         img_id = (basic.get("image") or "").strip()
         foto = f"https://cf.shopee.com.br/file/{img_id}" if img_id else FOTO_PADRAO
-        ofertas.append(_montar_item_oferta(
+        ofertas.append(_marcar_fonte_scrape(_montar_item_oferta(
             titulo, preco, _link_busca_shopee(titulo), foto, "shopee",
             full=bool(basic.get("shopee_verified") or basic.get("is_official_shop")),
-        ))
+        ), origem))
         if not _oferta_foto_preco_do_mesmo_item(ofertas[-1]):
             ofertas.pop()
             continue
@@ -1841,7 +2010,7 @@ def gerar_lista_ofertas_reais(
 
     for item in _coletar_ofertas_ao_vivo(termo):
         plat = item.get("plataforma")
-        if plat in plats_ja and item.get("fonte") != "oficial":
+        if plat in plats_ja and item.get("fonte") not in {"oficial", "scrape"}:
             continue
         antes = len(lista_produtos)
         _adicionar(item)
@@ -1924,17 +2093,33 @@ def main(page):
     page.window.resizable = True
     page.window.maximizable = True
 
-    def snack(msg, cor="#9D4EDD"):
-        page.show_dialog(
-            ft.SnackBar(
-                content=ft.Text(msg, color="#FFFFFF"),
-                bgcolor=cor,
-                open=True,
-            )
-        )
-
     def fechar_dialogo(e=None):
-        page.pop_dialog()
+        try:
+            page.pop_dialog()
+        except Exception:
+            pass
+
+    def fechar_todos_dialogos():
+        for _ in range(6):
+            try:
+                page.pop_dialog()
+            except Exception:
+                break
+
+    def snack(msg, cor="#9D4EDD"):
+        barra = ft.SnackBar(
+            content=ft.Text(msg, color="#FFFFFF"),
+            bgcolor=cor,
+            duration=2500,
+            open=True,
+        )
+        try:
+            if hasattr(page, "open"):
+                page.open(barra)
+            else:
+                page.show_dialog(barra)
+        except Exception:
+            pass
 
     async def copiar_texto(texto, ok_msg="Copiado"):
         try:
@@ -2034,8 +2219,10 @@ def main(page):
         color="#FFFFFF",
         border_radius=12,
     )
-    lbl_pontos = ft.Text("Pontos JDS: 0", color="#00F5D4",
-                         size=16, weight=ft.FontWeight.BOLD)
+    lbl_pontos = ft.Text(
+        f"Pontos JDS: {pontos_jds['saldo']}",
+        color="#00F5D4",
+        size=16, weight=ft.FontWeight.BOLD)
     lbl_roleta = ft.Text("Gire a Roleta da Sorte semanal",
                          color="#EDEDED", size=13)
     btn_checkin = ft.Button(
@@ -2077,33 +2264,29 @@ def main(page):
             await copiar_texto(produto["titulo"], "Título copiado")
 
         async def ver_oferta(e):
+            fechar_todos_dialogos()
             try:
                 await page.clipboard.set(CUPOM_JDS)
             except Exception:
                 pass
-            page.show_dialog(
-                ft.AlertDialog(
-                    bgcolor="#1A1A1E",
-                    title=ft.Text("Casador de Cupons",
-                                  color="#00F5D4", weight=ft.FontWeight.BOLD),
-                    content=ft.Text(
-                        "Cupom copiado automaticamente! Cole no carrinho para economizar mais!",
-                        color="#EDEDED",
-                    ),
-                    actions=[ft.Button("OK", on_click=fechar_dialogo)],
-                )
-            )
+            snack("Cupom JDS10 copiado. Cole no carrinho da loja.", "#00F5D4")
             try:
                 await page.launch_url(url_oferta)
             except TypeError:
                 page.launch_url(url_oferta)
+            await txt_busca.focus()
+            page.update()
 
         def salvar_desejo(e):
-            item = dict(produto)
-            item["alerta"] = True
+            url = produto.get("url") or ""
+            if any(_url_chave(x.get("url")) == _url_chave(url) and url for x in lista_desejos):
+                snack("Este produto já está na Lista de Desejos", "#FFB703")
+                return
+            item = _item_desejo_gravavel(produto)
             lista_desejos.append(item)
+            _salvar_desejos()
             render_desejos()
-            snack("Alerta de preço ativado. Push JDS simulado.", "#9D4EDD")
+            snack("Guardado. Vamos avisar se o preço cair (app aberto).", "#9D4EDD")
 
         return ft.Container(
             bgcolor="#1A1A1E",
@@ -2193,14 +2376,60 @@ def main(page):
             grade.controls.append(montar_card(
                 produto, extra_selo=selo_destaque))
 
+    def avisar_queda(item, preco_novo):
+        titulo = (item.get("titulo") or "Produto")[:80]
+        antigo = item.get("preco_anterior") or item.get("preco")
+        msg = f"{titulo}\nDe {antigo} por {preco_novo}"
+        snack(f"Desconto: {titulo} agora {preco_novo}", "#00F5D4")
+        try:
+            page.window.minimized = False
+            page.window.to_front()
+        except Exception:
+            pass
+        page.show_dialog(
+            ft.AlertDialog(
+                bgcolor="#1A1A1E",
+                title=ft.Text("Preço caiu!", color="#00F5D4", weight=ft.FontWeight.BOLD),
+                content=ft.Text(msg, color="#EDEDED"),
+                actions=[ft.Button("OK", on_click=fechar_dialogo)],
+            )
+        )
+
     def render_desejos():
         coluna_desejos.controls.clear()
         if not lista_desejos:
             coluna_desejos.controls.append(
                 ft.Text(
-                    "Nenhum alerta ainda. Favorite um card no Garimpar.", color="#888888")
+                    "Nenhum alerta ainda. Toque na estrela de um card no Garimpar.",
+                    color="#888888",
+                )
             )
-        for item in lista_desejos:
+        for idx, item in enumerate(list(lista_desejos)):
+            status = (
+                f"Caiu: {item.get('preco_anterior')} → {item.get('preco')}"
+                if item.get("queda")
+                else f"Monitorando {item.get('preco')}"
+            )
+
+            def remover(e, i=idx):
+                if 0 <= i < len(lista_desejos):
+                    lista_desejos.pop(i)
+                    _salvar_desejos()
+                    render_desejos()
+                    snack("Removido da Lista de Desejos", "#9D4EDD")
+
+            async def abrir_desejo(e, prod=item):
+                url = _link_compra_do_card(prod)
+                fechar_todos_dialogos()
+                try:
+                    await page.clipboard.set(CUPOM_JDS)
+                except Exception:
+                    pass
+                try:
+                    await page.launch_url(url)
+                except TypeError:
+                    page.launch_url(url)
+
             coluna_desejos.controls.append(
                 ft.Container(
                     bgcolor="#1A1A1E",
@@ -2208,14 +2437,21 @@ def main(page):
                     padding=12,
                     content=ft.Column(
                         [
-                            ft.Text(item["titulo"], color="#FFFFFF",
-                                    size=14, weight=ft.FontWeight.BOLD),
+                            ft.Text(item.get("titulo") or "", color="#FFFFFF",
+                                    size=14, weight=ft.FontWeight.BOLD, max_lines=2),
+                            ft.Text(item.get("loja") or "", color="#FFD700", size=12),
+                            ft.Text(status, color="#00F5D4"),
                             ft.Text(
-                                f"Monitorando {item['preco']}", color="#00F5D4"),
-                            ft.Text("Alerta de Preço: ATIVO",
-                                    color="#FFD700", size=12),
-                            ft.Text("Notificação Push JDS: simulada",
-                                    color="#9D4EDD", size=12),
+                                "Alerta ativo — aviso no app se o preço cair",
+                                color="#FFD700", size=12),
+                            ft.Row(
+                                [
+                                    ft.Button("Ver Oferta", bgcolor="#9D4EDD",
+                                              color="white", on_click=abrir_desejo),
+                                    ft.Button("Remover", bgcolor="#2A2A2E",
+                                              color="white", on_click=remover),
+                                ]
+                            ),
                         ],
                         spacing=4,
                     ),
@@ -2223,11 +2459,77 @@ def main(page):
             )
         page.update()
 
+    def _aplicar_queda(item, candidato):
+        try:
+            novo = float(candidato.get("preco_num") or 0)
+            antigo = float(item.get("preco_num") or 0)
+        except (TypeError, ValueError):
+            return False
+        if novo <= 0 or antigo <= 0 or novo >= antigo - 0.49:
+            item["queda"] = bool(item.get("queda"))
+            return False
+        item["preco_anterior"] = item.get("preco")
+        item["preco_num"] = novo
+        item["preco"] = _formatar_preco(novo)
+        item["url"] = candidato.get("url") or item.get("url")
+        item["queda"] = True
+        return True
+
+    async def verificar_desejos(_e=None, silencioso=False):
+        if not lista_desejos:
+            if not silencioso:
+                snack("Nenhum produto na Lista de Desejos")
+            return
+        if not silencioso:
+            snack("Verificando preços da Lista de Desejos...", "#9D4EDD")
+        houve = False
+        for item in lista_desejos:
+            termo = (item.get("titulo") or "").strip()
+            if not termo:
+                continue
+            try:
+                ofertas = await asyncio.to_thread(buscar_ofertas_jds, termo)
+            except Exception as e:
+                print(f"[Desejos] {e}")
+                continue
+            ofertas = _ordenar_entrega_menor_preco(ofertas or [])
+            if not ofertas:
+                continue
+            chave = _url_chave(item.get("url"))
+            mesma = [
+                o for o in ofertas
+                if _url_chave(o.get("url")) == chave or o.get("plataforma") == item.get("plataforma")
+            ]
+            cand = mesma[0] if mesma else ofertas[0]
+            if _aplicar_queda(item, cand):
+                houve = True
+                avisar_queda(item, item.get("preco"))
+        _salvar_desejos()
+        render_desejos()
+        if not silencioso and not houve:
+            snack("Nenhum desconto novo agora", "#FFB703")
+
+    async def loop_alertas_desejos():
+        await asyncio.sleep(45)
+        while True:
+            try:
+                await verificar_desejos(silencioso=True)
+            except Exception as e:
+                print(f"[Desejos loop] {e}")
+            await asyncio.sleep(INTERVALO_ALERTA_SEG)
+
+    buscando = {"ok": False}
+
     async def garimpar(_e=None):
+        fechar_todos_dialogos()
         termo = (txt_busca.value or "").strip()
         if not termo:
             snack("Digite um produto para garimpar")
             return
+        if buscando["ok"]:
+            snack("Ainda garimpando o produto anterior...", "#FFB703")
+            return
+        buscando["ok"] = True
         rodinha.visible = True
         page.update()
         try:
@@ -2244,10 +2546,32 @@ def main(page):
                 )
                 lbl_menor_preco.visible = True
                 snack(lbl_menor_preco.value, "#00F5D4")
+            for p in produtos or []:
+                for item in lista_desejos:
+                    mesma_url = _url_chave(p.get("url")) == _url_chave(item.get("url")) and _url_chave(item.get("url"))
+                    mesma_loja = (
+                        p.get("plataforma") == item.get("plataforma")
+                        and (item.get("titulo") or "")[:28].lower()
+                        in (p.get("titulo") or "").lower()
+                    )
+                    if (mesma_url or mesma_loja) and _aplicar_queda(item, p):
+                        avisar_queda(item, item.get("preco"))
+            if lista_desejos:
+                _salvar_desejos()
+                render_desejos()
+            try:
+                n = len(txt_busca.value or "")
+                txt_busca.selection = ft.TextSelection(
+                    base_offset=0, extent_offset=n)
+            except Exception:
+                pass
+            await txt_busca.focus()
         except Exception as e:
             snack(f"Falha no motor de busca: {e}", "#FF6B6B")
-        rodinha.visible = False
-        page.update()
+        finally:
+            buscando["ok"] = False
+            rodinha.visible = False
+            page.update()
 
     txt_busca.on_submit = garimpar
 
@@ -2256,7 +2580,7 @@ def main(page):
         await asyncio.sleep(0.4)
         txt_busca.value = "fone bluetooth"
         page.update()
-        garimpar()
+        await garimpar()
 
     def converter_achado(e):
         bruto = (txt_achado.value or "").strip()
@@ -2275,17 +2599,8 @@ def main(page):
                     await page.clipboard.set(CUPOM_JDS)
                 except Exception:
                     pass
-                page.show_dialog(
-                    ft.AlertDialog(
-                        bgcolor="#1A1A1E",
-                        title=ft.Text("Casador de Cupons", color="#00F5D4"),
-                        content=ft.Text(
-                            "Cupom copiado automaticamente! Cole no carrinho para economizar mais!",
-                            color="#EDEDED",
-                        ),
-                        actions=[ft.Button("OK", on_click=fechar_dialogo)],
-                    )
-                )
+                fechar_todos_dialogos()
+                snack("Cupom JDS10 copiado. Cole no carrinho da loja.", "#00F5D4")
                 try:
                     await page.launch_url(link)
                 except TypeError:
@@ -2318,17 +2633,24 @@ def main(page):
             return
         pontos_jds["checkin"] = hoje
         pontos_jds["saldo"] += 25
+        _salvar_pontos()
         lbl_pontos.value = f"Pontos JDS: {pontos_jds['saldo']}"
         snack("Check-in diário +25 pontos", "#00F5D4")
         page.update()
 
     def girar_roleta(e):
+        semana = date.today().strftime("%Y-W%W")
+        if pontos_jds.get("roleta") == semana:
+            snack("A roleta já girou nesta semana", "#FFB703")
+            return
         premio = random.choice(
             ["+50 pontos", "Cupom JDS10", "Frete monitorado",
                 "Alerta extra", "Tente na próxima semana"]
         )
         if "50" in premio:
             pontos_jds["saldo"] += 50
+        pontos_jds["roleta"] = semana
+        _salvar_pontos()
         lbl_pontos.value = f"Pontos JDS: {pontos_jds['saldo']}"
         lbl_roleta.value = f"Roleta da Sorte: {premio}"
         snack(f"Roleta: {premio}", "#9D4EDD")
@@ -2374,7 +2696,17 @@ def main(page):
     render_desejos()
     aba_desejos = ft.Column(
         [
-            ft.Text("Monitoramento e alerta de preço", color="#EDEDED"),
+            ft.Text(
+                "Aviso no app se o preço cair. Precisa do JDS aberto. Checagem a cada 15 min.",
+                color="#EDEDED",
+                size=13,
+            ),
+            ft.Button(
+                "Verificar preços agora",
+                bgcolor="#9D4EDD",
+                color="white",
+                on_click=verificar_desejos,
+            ),
             coluna_desejos,
         ],
         spacing=12,
@@ -2446,6 +2778,7 @@ def main(page):
     )
 
     page.add(frase_sagrada, topo, abas)
+    page.run_task(loop_alertas_desejos)
 
 
 def executar_testes_unitarios():

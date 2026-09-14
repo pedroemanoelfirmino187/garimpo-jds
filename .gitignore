@@ -4,5 +4,7 @@ __pycache__/
 .venv/
 venv/
 cache_garimpo.json
+desejos_jds.json
+pontos_jds.json
 debug_google.html
 .cursor/
