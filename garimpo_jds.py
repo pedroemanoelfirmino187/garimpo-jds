@@ -431,6 +431,49 @@ def _asin_amazon(url):
     return achado.group(1).upper() if achado else ""
 
 
+def _id_mlb(url):
+    achado = re.search(r"MLB-?(\d{8,})", url or "", re.I)
+    return achado.group(1) if achado else ""
+
+
+def _titulo_parece_mesmo_produto(titulo_a, titulo_b):
+    a = set(_tokens_busca(titulo_a))
+    b = set(_tokens_busca(titulo_b))
+    if not a or not b:
+        return False
+    comuns = a & b
+    return len(comuns) >= min(3, max(2, int(0.5 * min(len(a), len(b)))))
+
+
+def _scrape_e_o_mesmo_produto(item, ref):
+    """Scrape só substitui o catálogo se for o mesmo anúncio/produto."""
+    if not item or not ref:
+        return False
+    plat = item.get("plataforma")
+    if plat != ref.get("plataforma"):
+        return False
+    try:
+        pi = float(item.get("preco_num") or 0)
+        pr = float(ref.get("preco_num") or 0)
+    except (TypeError, ValueError):
+        return False
+    if pi <= 0 or pr <= 0:
+        return False
+    if plat == "amazon":
+        ai = _asin_amazon(item.get("url") or "")
+        ar = _asin_amazon(ref.get("url") or "")
+        if ar:
+            return bool(ai) and ai == ar
+    if plat == "mercado_livre":
+        mi = _id_mlb(item.get("url") or "")
+        mr = _id_mlb(ref.get("url") or "")
+        if mr:
+            return bool(mi) and mi == mr
+    if not _titulo_parece_mesmo_produto(item.get("titulo"), ref.get("titulo")):
+        return False
+    return pi >= pr * 0.72
+
+
 def _foto_e_generica(foto):
     f = (foto or "").lower()
     if not f.startswith("http"):
@@ -1418,7 +1461,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 
 def _chave_cache(termo):
-    return "v5:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
+    return "v6:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
 
 
 def _ler_cache_garimpo(termo):
@@ -2095,18 +2138,15 @@ def gerar_lista_ofertas_reais(
             _adicionar(item)
             plats_ja.add(plat)
 
+    catalogo_ja = list(lista_produtos)
+
     if usar_vivo:
         for item in _coletar_ofertas_ao_vivo(termo):
             plat = item.get("plataforma")
             if plat in plats_ja and item.get("fonte") not in {"oficial", "scrape"}:
                 continue
-            tlow = termo.lower()
-            if (
-                plat == "amazon"
-                and any(k in tlow for k in ("dualsense", "ps5", "playstation"))
-                and _asin_amazon(item.get("url") or "") != ASIN_DUALSENSE
-                and any(ASIN_DUALSENSE in (p.get("url") or "").upper() for p in lista_produtos)
-            ):
+            refs = [p for p in catalogo_ja if p.get("plataforma") == plat]
+            if refs and not any(_scrape_e_o_mesmo_produto(item, r) for r in refs):
                 continue
             antes = len(lista_produtos)
             _adicionar(item)
@@ -2910,6 +2950,44 @@ def executar_testes_unitarios():
         xbox and abs(xbox[0]["preco_num"] - 429.90) < 0.06 and "xbox" in xbox[0]["titulo"].lower(),
         "busca xbox não devolve DualSense",
     )
+    dual_ref = _montar_item_oferta(
+        "PlayStation DualSense Controle sem fio",
+        404.27,
+        f"https://www.amazon.com.br/dp/{ASIN_DUALSENSE}",
+        FOTO_PADRAO,
+        "amazon",
+    )
+    dual_errado = _montar_item_oferta(
+        "PlayStation DualSense Controle sem fio",
+        292.78,
+        "https://www.amazon.com.br/dp/B0ACCESSOR1",
+        FOTO_PADRAO,
+        "amazon",
+    )
+    dual_mesmo = _montar_item_oferta(
+        "PlayStation DualSense Controle sem fio",
+        380.00,
+        f"https://www.amazon.com.br/dp/{ASIN_DUALSENSE}",
+        FOTO_PADRAO,
+        "amazon",
+    )
+    checar(not _scrape_e_o_mesmo_produto(dual_errado, dual_ref), "ASIN diferente não substitui DualSense")
+    checar(_scrape_e_o_mesmo_produto(dual_mesmo, dual_ref), "mesmo ASIN DualSense pode atualizar preço")
+    redmi_ref = _montar_item_oferta(
+        "Xiaomi Redmi Note 13 4G 128GB",
+        999.00,
+        "https://www.amazon.com.br/dp/B0CS3V5J3H",
+        FOTO_PADRAO,
+        "amazon",
+    )
+    redmi_capa = _montar_item_oferta(
+        "Capa Redmi Note 13",
+        24.90,
+        "https://www.amazon.com.br/dp/B0CAPINHA01",
+        FOTO_PADRAO,
+        "amazon",
+    )
+    checar(not _scrape_e_o_mesmo_produto(redmi_capa, redmi_ref), "capa Redmi não substitui o celular")
     checar(_titulo_relevante("notebook dell", "Dell Inspiron 15 Laptop Intel i5"), "notebook = laptop")
     checar(_titulo_relevante("smart tv 50", "Samsung Smart TV 50 4K Crystal UHD"), "TV 50 aceita 50 polegadas")
     checar(not _titulo_relevante("smart tv 50", "TV Samsung Smart HD 32 LS32H5000"), "TV 32 não passa como 50")
