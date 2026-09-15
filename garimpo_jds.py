@@ -1832,6 +1832,9 @@ def _item_serper_loja_ok(it):
     return _source_loja_oficial(src) or _plataforma_loja(href) in {
         "amazon", "mercado_livre", "shopee",
     }
+
+
+def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20):
     """
     Função principal: cache → POST Serper Shopping (BR) → só Amazon/ML/Shopee
     → preço float → menor preço no topo.
