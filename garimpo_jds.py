@@ -39,9 +39,67 @@ try:
 except ImportError:
     BeautifulSoup = None
 
-ID_AMAZON = "jdseconomiz0e-20"
+ID_AMAZON = (
+    (os.environ.get("AMAZON_PARTNER_TAG") or os.environ.get("AMAZON_TAG_BR") or "").strip()
+    or "jdseconomiz0e-20"
+)
+ID_AMAZON_US = (
+    (os.environ.get("AMAZON_TAG_US") or os.environ.get("AMAZON_PARTNER_TAG_US") or "").strip()
+    or "jdseconomiza-20"
+)
 ID_SHOPEE = "18381751263"
 ID_MERCADO_LIVRE = "mape592520"
+
+
+def _normalizar_pais(pais):
+    p = (pais or "BR").strip().upper().replace("-", " ")
+    if p in {"US", "USA", "UNITED STATES", "EUA", "EN", "EN US"}:
+        return "US"
+    return "BR"
+
+
+def _serper_locale(pais="BR"):
+    if _normalizar_pais(pais) == "US":
+        return {"gl": "us", "hl": "en"}
+    return {"gl": "br", "hl": "pt-br"}
+
+
+def _lojas_do_pais(pais="BR"):
+    if _normalizar_pais(pais) == "US":
+        return ("amazon", "ebay")
+    return ("amazon", "mercado_livre", "shopee")
+
+
+def _host_amazon_eua(url):
+    host = urllib.parse.urlparse(url or "").netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if "amazon.com.br" in host or "amazon.com.mx" in host:
+        return False
+    return host == "amazon.com" or host.endswith(".amazon.com")
+
+
+def _carimbar_tag_amazon(url, tag):
+    url_limpa = (url or "").strip()
+    if not url_limpa.startswith("http") or "amazon." not in url_limpa.lower():
+        return url_limpa
+    try:
+        parsed = urllib.parse.urlparse(url_limpa)
+        qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        qs["tag"] = [(tag or ID_AMAZON).strip() or ID_AMAZON]
+        return urllib.parse.urlunparse(parsed._replace(
+            query=urllib.parse.urlencode(qs, doseq=True),
+        ))
+    except Exception:
+        sep = "&" if "?" in url_limpa else "?"
+        return f"{url_limpa}{sep}tag={tag or ID_AMAZON}"
+
+
+def aplicar_tag_amazon_eua(url):
+    """amazon.com → jdseconomiza-20. Nunca usa o ID do Brasil."""
+    if "amazon.com.br" in (url or "").lower():
+        return _carimbar_tag_amazon(url, ID_AMAZON)
+    return _carimbar_tag_amazon(url, ID_AMAZON_US)
 ASIN_DUALSENSE = "B0CQKLS4RP"
 CUPOM_JDS = "JDS10"
 CACHE_GARIMPO = Path(__file__).resolve().parent / "cache_garimpo.json"
@@ -160,8 +218,10 @@ def _preco_serper_para_float(texto):
     return _preco_para_numero(texto)
 
 
-def _source_loja_oficial(source):
+def _source_loja_oficial(source, pais="BR"):
     s = (source or "").lower()
+    if _normalizar_pais(pais) == "US":
+        return "amazon" in s or "ebay" in s
     return (
         "mercado livre" in s
         or "mercadolivre" in s
@@ -171,7 +231,7 @@ def _source_loja_oficial(source):
     )
 
 
-def _preco_para_numero(texto):
+def _preco_para_numero(texto, pais="BR"):
     if texto is None:
         return 0.0
     if isinstance(texto, (int, float)):
@@ -179,7 +239,12 @@ def _preco_para_numero(texto):
     limpo = re.sub(r"[^\d,.-]", "", str(texto))
     if not limpo:
         return 0.0
-    if "," in limpo and "." in limpo:
+    if _normalizar_pais(pais) == "US":
+        if "," in limpo and "." in limpo:
+            limpo = limpo.replace(",", "")
+        elif "," in limpo and "." not in limpo:
+            limpo = limpo.replace(",", ".")
+    elif "," in limpo and "." in limpo:
         limpo = limpo.replace(".", "").replace(",", ".")
     elif "," in limpo:
         limpo = limpo.replace(",", ".")
@@ -189,10 +254,12 @@ def _preco_para_numero(texto):
         return 0.0
 
 
-def _formatar_preco(valor):
+def _formatar_preco(valor, pais="BR"):
     # Se o valor for 999999.0, retorna texto especial
     if valor == 999999.0:
         return "Ver Preço Real no Site"
+    if _normalizar_pais(pais) == "US":
+        return f"$ {valor:,.2f}"
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
@@ -204,6 +271,8 @@ def _detectar_plataforma(url):
         return "shopee"
     if "mercadolivre." in baixa or "mercadolibre." in baixa:
         return "mercado_livre"
+    if "ebay." in baixa:
+        return "ebay"
     return "mercado_livre"
 
 
@@ -211,6 +280,7 @@ NOMES_LOJA = {
     "mercado_livre": "Mercado Livre",
     "amazon": "Amazon",
     "shopee": "Shopee",
+    "ebay": "eBay",
 }
 
 
@@ -253,6 +323,18 @@ def _link_busca_amazon(termo):
     )
 
 
+def _link_busca_amazon_us(termo):
+    q = urllib.parse.quote((termo or "deals").strip())
+    return (
+        f"https://www.amazon.com/s?k={q}&s=price-asc-rank&tag={ID_AMAZON_US}"
+    )
+
+
+def _link_busca_ebay(termo):
+    q = urllib.parse.quote((termo or "deals").strip())
+    return f"https://www.ebay.com/sch/i.html?_nkw={q}&_sop=15"
+
+
 def _anuncio_veio_do_google(produto):
     fonte = ((produto or {}).get("fonte") or "").lower()
     return fonte in {"google", "scrape", "oficial"}
@@ -262,7 +344,14 @@ def _link_compra_do_card(produto):
     """Ver Oferta: página da loja já ordenada pelo menor preço daquele produto."""
     plat = (produto or {}).get("plataforma")
     url = (produto or {}).get("url") or ""
+    pais = _normalizar_pais((produto or {}).get("pais") or "BR")
     q = _consulta_do_card(produto)
+    if pais == "US":
+        if plat == "amazon":
+            return aplicar_tag_amazon_eua(url or _link_busca_amazon_us(q))
+        if plat == "ebay":
+            return url or _link_busca_ebay(q)
+        return url
     if plat == "amazon" and _asin_amazon(url) == ASIN_DUALSENSE:
         return _aplicar_afiliado_google(
             f"https://www.amazon.com.br/dp/{ASIN_DUALSENSE}", "amazon",
@@ -302,6 +391,8 @@ def _eh_link_produto(url, plataforma):
         )
     if plataforma == "shopee":
         return "shopee.com.br/search" in u or "-i." in u or "/product/" in u
+    if plataforma == "ebay":
+        return "ebay." in u and ("/itm/" in u or "/sch/" in u or "/i/" in u)
     return False
 
 
@@ -339,6 +430,8 @@ def _eh_pagina_compra(url, plat):
             or "affiliate.shopee" in u
             or "s.shopee.com.br" in u
         )
+    if plat == "ebay":
+        return "/itm/" in u or "/i/" in u
     return False
 
 
@@ -415,6 +508,8 @@ def _foto_da_oferta(url, plat, foto_hint=""):
         return hint.replace("-I.jpg", "-O.jpg").replace("-I.webp", "-O.webp")
     if plat == "shopee" and ("cf.shopee" in baixa or "shopee" in baixa):
         return hint
+    if plat == "ebay" and ("ebay" in baixa or "ebayimg" in baixa):
+        return hint
     if plat == "amazon" and "amazon" in baixa:
         return hint
     if "mlstatic.com" in baixa or "media-amazon" in baixa or "cf.shopee" in baixa:
@@ -450,25 +545,30 @@ def _oferta_foto_preco_do_mesmo_item(item):
         return "mlstatic" in f or "media-amazon" in f
     if plat == "shopee":
         return "shopee" in f or "cf.shopee" in f or "media-amazon" in f
+    if plat == "ebay":
+        return "ebay" in f or "ebayimg" in f or "i.ebay" in f or "gstatic.com" in f
     return False
 
 
-def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NOVO"):
+def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NOVO", pais="BR"):
+    pais = _normalizar_pais(pais)
     if _eh_pagina_compra(url, plat):
-        url_final = _aplicar_afiliado_google(url, plat)
+        url_final = _aplicar_afiliado_google(url, plat, pais=pais)
     elif plat == "shopee":
         url_final = _link_busca_shopee(titulo)
     elif plat == "amazon":
-        url_final = _link_busca_amazon(titulo)
+        url_final = _link_busca_amazon_us(titulo) if pais == "US" else _link_busca_amazon(titulo)
     elif plat == "mercado_livre":
         url_final = _link_busca_ml(titulo)
+    elif plat == "ebay":
+        url_final = url if _eh_link_produto(url, "ebay") else _link_busca_ebay(titulo)
     else:
-        url_final = _aplicar_afiliado_google(url, plat)
+        url_final = _aplicar_afiliado_google(url, plat, pais=pais)
     foto_final = _foto_da_oferta(url_final, plat, foto) or _foto_da_oferta(url, plat, foto)
-    url_final = _aplicar_afiliado_google(url_final, plat)
-    return {
+    url_final = _aplicar_afiliado_google(url_final, plat, pais=pais)
+    item = {
         "titulo": titulo,
-        "preco": _formatar_preco(preco_num),
+        "preco": _formatar_preco(preco_num, pais=pais),
         "preco_num": float(preco_num),
         "url": url_final,
         "foto": foto_final,
@@ -479,7 +579,9 @@ def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NO
         "aviso_golpe": False,
         "selo": selo,
         "vale_a_pena": True,
+        "pais": pais,
     }
+    return item
 
 
 
@@ -659,7 +761,7 @@ def _parece_acessorio_barato(titulo, termo=""):
     )
 
 
-def _preco_plausivel(termo, preco, titulo):
+def _preco_plausivel(termo, preco, titulo, pais="BR"):
     try:
         preco = float(preco)
     except (TypeError, ValueError):
@@ -678,6 +780,8 @@ def _preco_plausivel(termo, preco, titulo):
         piso = max(piso, 199.0)
     if any(k in tlow for k in ("redmi", "iphone", "xiaomi", "galaxy")):
         piso = max(piso, 449.0)
+    if _normalizar_pais(pais) == "US":
+        piso = 1.0
     return preco >= piso
 
 
@@ -747,14 +851,17 @@ def _raspar_cards_mercado_livre(termo_busca, limite=6):
     return produtos
 
 
-def _aplicar_afiliado_google(link_loja, plataforma=None):
+def _aplicar_afiliado_google(link_loja, plataforma=None, pais="BR"):
     """Todo link de loja sai com afiliado JDS (substitui tag de terceiros)."""
     url_limpa = (link_loja or "").strip()
     if not url_limpa.startswith("http"):
         return url_limpa
+    pais = _normalizar_pais(pais)
     plat = plataforma or _plataforma_loja(url_limpa)
-    if plat not in {"amazon", "shopee", "mercado_livre"}:
+    if plat not in {"amazon", "shopee", "mercado_livre", "ebay"}:
         plat = _detectar_plataforma(url_limpa)
+    if plat == "amazon" and _host_amazon_eua(url_limpa):
+        return aplicar_tag_amazon_eua(url_limpa)
     try:
         parsed = urllib.parse.urlparse(url_limpa)
         qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
@@ -769,6 +876,8 @@ def _aplicar_afiliado_google(link_loja, plataforma=None):
             if "shopee.com.br/search" in url_limpa.lower():
                 qs["sortBy"] = ["sales"]
                 qs.pop("order", None)
+        elif plat == "ebay":
+            return url_limpa
         else:
             return url_limpa
         return urllib.parse.urlunparse(parsed._replace(
@@ -1292,12 +1401,13 @@ def _ordenar_entrega_menor_preco(lista_produtos):
     return ordenados
 
 
-def _chave_cache(termo):
-    return "v13:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
+def _chave_cache(termo, pais="BR"):
+    pais = _normalizar_pais(pais)
+    return "v14:" + pais + ":" + re.sub(r"\s+", " ", (termo or "").strip().lower())
 
 
-def _ler_cache_garimpo(termo):
-    chave = _chave_cache(termo)
+def _ler_cache_garimpo(termo, pais="BR"):
+    chave = _chave_cache(termo, pais=pais)
     if not chave or not CACHE_GARIMPO.exists():
         return None
     try:
@@ -1316,8 +1426,8 @@ def _ler_cache_garimpo(termo):
         return None
 
 
-def _gravar_cache_garimpo(termo, produtos):
-    chave = _chave_cache(termo)
+def _gravar_cache_garimpo(termo, produtos, pais="BR"):
+    chave = _chave_cache(termo, pais=pais)
     if not chave:
         return
     dados = {}
@@ -1589,6 +1699,8 @@ def _loja_do_texto(texto):
         return "amazon"
     if "shopee" in t:
         return "shopee"
+    if "ebay" in t:
+        return "ebay"
     if "mercado livre" in t or "mercadolivre" in t or "mercado libre" in t:
         return "mercado_livre"
     return ""
@@ -1651,6 +1763,8 @@ def _plataforma_loja(url):
         return "shopee"
     if "mercadolivre." in baixa or "mercadolibre." in baixa:
         return "mercado_livre"
+    if "ebay." in baixa:
+        return "ebay"
     return ""
 
 
@@ -1661,34 +1775,44 @@ def _foto_placeholder_loja(plat):
         return "https://http2.mlstatic.com/frontend-assets/ml-web-navigation/navbar-assets/icon-logo-mercado-libre.png"
     if plat == "shopee":
         return "https://deo.shopeemobile.com/shopee/shopee-pcmall-live-sg/assets/icon_favicon.png"
+    if plat == "ebay":
+        return "https://ir.ebaystatic.com/cr/v/c1/ebay-logo-2016.png"
     return ""
 
 
-def _item_google(termo, titulo, preco, href, foto, plat, origem=""):
+def _item_google(termo, titulo, preco, href, foto, plat, origem="", pais="BR"):
+    pais = _normalizar_pais(pais)
     if not plat:
         plat = _plataforma_loja(href) or _loja_do_texto(titulo)
     if not plat or preco <= 0:
         return None
+    if plat not in _lojas_do_pais(pais):
+        return None
+    if pais == "US" and plat == "amazon" and not _host_amazon_eua(href) and href:
+        return None
     if _parece_artigo_nao_produto(titulo) or _parece_url_conteudo(href):
         return None
-    if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo):
+    if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo, pais=pais):
         return None
     if not href or not _eh_link_produto(href, plat):
         if plat == "amazon":
-            href = _link_busca_amazon(termo)
+            href = _link_busca_amazon_us(termo) if pais == "US" else _link_busca_amazon(termo)
         elif plat == "mercado_livre":
             href = _link_busca_ml(termo)
         elif plat == "shopee":
             href = _link_busca_shopee(termo)
+        elif plat == "ebay":
+            href = _link_busca_ebay(termo)
         else:
             return None
     foto = (foto or "").strip()
     if foto.startswith("//"):
         foto = "https:" + foto
-    item = _montar_item_oferta(titulo, preco, href, foto, plat)
+    item = _montar_item_oferta(titulo, preco, href, foto, plat, pais=pais)
     item["fonte"] = "google"
     _marcar_fonte_scrape(item, origem)
     item["fonte"] = "google"
+    item["pais"] = pais
     if _foto_e_generica(item.get("foto") or ""):
         item["foto"] = foto if not _foto_e_generica(foto) else _foto_placeholder_loja(plat)
     if not _oferta_foto_preco_do_mesmo_item(item):
@@ -1812,7 +1936,7 @@ def _serper_post(caminho, corpo):
         return {}
 
 
-def _preco_item_serper(it):
+def _preco_item_serper(it, pais="BR"):
     if not isinstance(it, dict):
         return 0.0
     for k in ("extracted_price", "extractedPrice"):
@@ -1822,7 +1946,7 @@ def _preco_item_serper(it):
                 return n
         except (TypeError, ValueError):
             pass
-    return _preco_serper_para_float(it.get("price") or it.get("snippet") or "")
+    return _preco_para_numero(it.get("price") or it.get("snippet") or "", pais=pais)
 
 
 def _href_item_serper(it):
@@ -1848,22 +1972,23 @@ def _guardar_melhor_loja(ofertas, item):
     return ofertas
 
 
-def _ofertas_de_itens_serper(termo, itens, limite=8):
+def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
+    pais = _normalizar_pais(pais)
     ofertas = []
     for it in itens or []:
         if not isinstance(it, dict):
             continue
-        if not _item_serper_loja_ok(it):
+        if not _item_serper_loja_ok(it, pais=pais):
             continue
         titulo = (it.get("title") or it.get("name") or termo or "").strip()
         blob = " ".join(str(it.get(k) or "") for k in ("source", "domain", "title", "snippet", "link"))
         href = _href_item_serper(it)
         plat = _plataforma_loja(href) or _loja_do_texto(blob)
-        preco = _preco_item_serper(it)
+        preco = _preco_item_serper(it, pais=pais)
         foto = (it.get("imageUrl") or it.get("image") or "").strip()
         ofertas = _guardar_melhor_loja(
             ofertas,
-            _item_google(termo, titulo, preco, href, foto, plat, origem="serper"),
+            _item_google(termo, titulo, preco, href, foto, plat, origem="serper", pais=pais),
         )
         if len(ofertas) >= limite:
             break
@@ -1871,34 +1996,45 @@ def _ofertas_de_itens_serper(termo, itens, limite=8):
     return ofertas[:limite]
 
 
-def _item_serper_loja_ok(it):
+def _item_serper_loja_ok(it, pais="BR"):
     if not isinstance(it, dict):
         return False
+    pais = _normalizar_pais(pais)
     src = it.get("source") or it.get("domain") or ""
     href = _href_item_serper(it)
-    return _source_loja_oficial(src) or _plataforma_loja(href) in {
+    plat = _plataforma_loja(href) or _loja_do_texto(src)
+    if plat not in _lojas_do_pais(pais) and not _source_loja_oficial(src, pais=pais):
+        return False
+    if pais == "US":
+        if plat == "amazon" and href and not _host_amazon_eua(href):
+            return False
+        return plat in {"amazon", "ebay"} or _source_loja_oficial(src, pais="US")
+    return _source_loja_oficial(src, pais="BR") or plat in {
         "amazon", "mercado_livre", "shopee",
     }
 
 
-def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20):
+def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR"):
     """
-    Função principal: cache → POST Serper Shopping (BR) → só Amazon/ML/Shopee
-    → preço float → menor preço no topo.
+    Cache → POST Serper Shopping → lojas do país → preço float → menor preço no topo.
+    BR: Amazon, Mercado Livre, Shopee (gl=br, hl=pt-br).
+    US: Amazon e eBay (gl=us, hl=en), tag Amazon EUA em todo /dp/.
     """
     t = (termo or "").strip()
+    pais = _normalizar_pais(pais)
     if not t:
         return []
     if usar_cache:
-        cached = _ler_cache_garimpo(t)
+        cached = _ler_cache_garimpo(t, pais=pais)
         if cached:
-            lista = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(cached))
+            lista = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(cached, pais=pais))
             if lista:
-                print(f"[Serper] cache {_chave_cache(t)}")
+                print(f"[Serper] cache {_chave_cache(t, pais=pais)}")
                 return lista
     chave = _chave_serper()
     if not chave or requests is None:
         return []
+    loc = _serper_locale(pais)
     try:
         resp = requests.post(
             "https://google.serper.dev/shopping",
@@ -1906,7 +2042,7 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20):
                 "X-API-KEY": chave,
                 "Content-Type": "application/json",
             },
-            json={"q": t, "gl": "br", "hl": "pt-br", "num": min(int(limite or 20), 40)},
+            json={"q": t, "gl": loc["gl"], "hl": loc["hl"], "num": min(int(limite or 20), 40)},
             timeout=18,
         )
         if resp.status_code >= 400:
@@ -1920,34 +2056,42 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20):
         return []
     shopping = [
         it for it in (dados.get("shopping") or [])
-        if isinstance(it, dict) and _item_serper_loja_ok(it)
+        if isinstance(it, dict) and _item_serper_loja_ok(it, pais=pais)
     ]
-    ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite)
-    ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas))
+    ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite, pais=pais)
+    ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
     if usar_cache and ofertas:
-        _gravar_cache_garimpo(t, ofertas)
-    print(f"[Serper] {len(ofertas)} ofertas filtradas (Amazon/ML/Shopee)")
+        _gravar_cache_garimpo(t, ofertas, pais=pais)
+    print(f"[Serper] {len(ofertas)} ofertas filtradas ({pais}: {', '.join(_lojas_do_pais(pais))})")
     return ofertas
 
 
-def _completar_lojas_serper(termo, ofertas, limite=8):
-    """Uma busca Serper por loja que faltar (Amazon, ML, Shopee)."""
-    sites = (
-        ("amazon", "site:amazon.com.br"),
-        ("mercado_livre", "site:mercadolivre.com.br"),
-        ("shopee", "site:shopee.com.br"),
-    )
+def _completar_lojas_serper(termo, ofertas, limite=8, pais="BR"):
+    """Uma busca Serper por loja que faltar."""
+    pais = _normalizar_pais(pais)
+    loc = _serper_locale(pais)
+    if pais == "US":
+        sites = (
+            ("amazon", "site:amazon.com -site:amazon.com.br"),
+            ("ebay", "site:ebay.com"),
+        )
+    else:
+        sites = (
+            ("amazon", "site:amazon.com.br"),
+            ("mercado_livre", "site:mercadolivre.com.br"),
+            ("shopee", "site:shopee.com.br"),
+        )
     t = (termo or "").strip()
     for plat, site in sites:
         if plat in {p.get("plataforma") for p in ofertas}:
             continue
         dados = _serper_post("/search", {
             "q": f"{t} {site}",
-            "gl": "br",
-            "hl": "pt-br",
+            "gl": loc["gl"],
+            "hl": loc["hl"],
             "num": 8,
         })
-        for item in _ofertas_de_itens_serper(t, dados.get("organic") or [], limite):
+        for item in _ofertas_de_itens_serper(t, dados.get("organic") or [], limite, pais=pais):
             if item.get("plataforma") == plat:
                 ofertas = _guardar_melhor_loja(ofertas, item)
                 break
@@ -1955,31 +2099,32 @@ def _completar_lojas_serper(termo, ofertas, limite=8):
             continue
         dados = _serper_post("/shopping", {
             "q": f"{t} {site}",
-            "gl": "br",
-            "hl": "pt-br",
+            "gl": loc["gl"],
+            "hl": loc["hl"],
             "num": 10,
         })
-        for item in _ofertas_de_itens_serper(t, dados.get("shopping") or [], limite):
+        for item in _ofertas_de_itens_serper(t, dados.get("shopping") or [], limite, pais=pais):
             if item.get("plataforma") == plat:
                 ofertas = _guardar_melhor_loja(ofertas, item)
                 break
     return ofertas
 
 
-def _buscar_ofertas_serper(termo, limite=8):
+def _buscar_ofertas_serper(termo, limite=8, pais="BR"):
     """Shopping Serper + uma busca por loja que faltar."""
-    ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=False, limite=limite)
-    ofertas = _completar_lojas_serper(termo, ofertas, limite=limite)
+    pais = _normalizar_pais(pais)
+    ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=False, limite=limite, pais=pais)
+    ofertas = _completar_lojas_serper(termo, ofertas, limite=limite, pais=pais)
     ofertas = _ordenar_entrega_menor_preco(ofertas)
     if ofertas:
-        print(f"[Serper] {len(ofertas[:limite])} ofertas do Google")
+        print(f"[Serper] {len(ofertas[:limite])} ofertas do Google ({pais})")
     return ofertas[:limite]
 
 
-def _buscar_ofertas_google_shopping(termo, limite=8):
+def _buscar_ofertas_google_shopping(termo, limite=8, pais="BR"):
     """Serper no ar. Sem chave, não raspa Google (bloqueado no Railway)."""
     if _chave_serper():
-        return _buscar_ofertas_serper(termo, limite)
+        return _buscar_ofertas_serper(termo, limite, pais=pais)
     print("[Google] sem SERPER_API_KEY — pulando scrape")
     return []
 
@@ -2360,28 +2505,43 @@ def _coletar_ofertas_ao_vivo(termo):
     return ofertas
 
 
-def _ofertas_fallback_lojas(termo):
-    """Se a API falhar, ainda entrega busca de compra nas 3 lojas."""
+def _ofertas_fallback_lojas(termo, pais="BR"):
+    """Se a API falhar, ainda entrega busca de compra nas lojas do país."""
     t = (termo or "").strip()
+    pais = _normalizar_pais(pais)
     if not t:
         return []
-    specs = (
-        (
-            "mercado_livre",
-            _link_busca_ml(t),
-            "https://http2.mlstatic.com/frontend-assets/ml-web-navigation/navbar-assets/icon-logo-mercado-libre.png",
-        ),
-        (
-            "amazon",
-            _link_busca_amazon(t),
-            "https://m.media-amazon.com/images/G/32/social_share/amazon_logo._CB149932011_.png",
-        ),
-        (
-            "shopee",
-            _link_busca_shopee(t),
-            "https://deo.shopeemobile.com/shopee/shopee-pcmall-live-sg/assets/icon_favicon.png",
-        ),
-    )
+    if pais == "US":
+        specs = (
+            (
+                "amazon",
+                _link_busca_amazon_us(t),
+                "https://m.media-amazon.com/images/G/01/social_share/amazon_logo._CB149932011_.png",
+            ),
+            (
+                "ebay",
+                _link_busca_ebay(t),
+                "https://ir.ebaystatic.com/cr/v/c1/ebay-logo-2016.png",
+            ),
+        )
+    else:
+        specs = (
+            (
+                "mercado_livre",
+                _link_busca_ml(t),
+                "https://http2.mlstatic.com/frontend-assets/ml-web-navigation/navbar-assets/icon-logo-mercado-libre.png",
+            ),
+            (
+                "amazon",
+                _link_busca_amazon(t),
+                "https://m.media-amazon.com/images/G/32/social_share/amazon_logo._CB149932011_.png",
+            ),
+            (
+                "shopee",
+                _link_busca_shopee(t),
+                "https://deo.shopeemobile.com/shopee/shopee-pcmall-live-sg/assets/icon_favicon.png",
+            ),
+        )
     ofertas = []
     for plat, url, foto in specs:
         ofertas.append({
@@ -2400,14 +2560,23 @@ def _ofertas_fallback_lojas(termo):
             "fonte": "busca_loja",
             "campeao": False,
             "termo_busca": t,
+            "pais": pais,
         })
     return ofertas
 
 
-def _carimbar_lista_afiliado(lista):
+def _carimbar_lista_afiliado(lista, pais="BR"):
     """Garante afiliado JDS em todo link entregue ao usuário."""
+    pais = _normalizar_pais(pais)
     for p in lista or []:
-        p["url"] = _link_compra_do_card(p)
+        p_pais = _normalizar_pais(p.get("pais") or pais)
+        p["pais"] = p_pais
+        if p.get("plataforma") == "amazon" and (
+            p_pais == "US" or _host_amazon_eua(p.get("url") or "")
+        ):
+            p["url"] = aplicar_tag_amazon_eua(p.get("url") or "")
+        else:
+            p["url"] = _link_compra_do_card(p)
     return lista
 
 
@@ -2419,20 +2588,22 @@ def gerar_lista_ofertas_reais(
     urls_reais=None,
     usar_cache=True,
     usar_vivo=True,
+    pais="BR",
 ):
     """
     Motor de precisão: qualquer termo, menor preço no topo, Ver Oferta na compra.
     """
     termo = (termo_busca or "").strip()
+    pais = _normalizar_pais(pais)
     if not termo:
         return []
 
     if usar_cache:
-        cached = _ler_cache_garimpo(termo)
+        cached = _ler_cache_garimpo(termo, pais=pais)
         if cached:
             lista = _ordenar_entrega_menor_preco(cached)
             if lista:
-                lista = _carimbar_lista_afiliado(lista)
+                lista = _carimbar_lista_afiliado(lista, pais=pais)
                 print(f"[Motor] cache instantâneo: {lista[0]['preco']} em {lista[0].get('loja')}")
                 return lista
 
@@ -2444,12 +2615,15 @@ def gerar_lista_ofertas_reais(
         if not url or url in urls_vistas:
             return
         plat = item.get("plataforma")
+        if plat not in _lojas_do_pais(pais):
+            return
         if not _eh_link_produto(url, plat):
             return
         if not _oferta_foto_preco_do_mesmo_item(item):
             return
         item["loja"] = _nome_loja(plat)
         item["termo_busca"] = termo
+        item["pais"] = pais
         urls_vistas.add(url)
         lista_produtos.append(item)
 
@@ -2462,17 +2636,18 @@ def gerar_lista_ofertas_reais(
             _adicionar(_montar_item_oferta(
                 f"{termo.title()} - Oferta #{i + 1}",
                 p_val, url_real, FOTO_PADRAO, plat, full=plat == "shopee",
+                pais=pais,
             ))
 
     plats_ja = {p.get("plataforma") for p in lista_produtos}
 
     if usar_vivo:
-        for item in _buscar_ofertas_google_shopping(termo):
+        for item in _buscar_ofertas_google_shopping(termo, pais=pais):
             antes = len(lista_produtos)
             _adicionar(item)
             if len(lista_produtos) > antes:
                 plats_ja.add(item.get("plataforma"))
-        if len(plats_ja) < 3:
+        if pais == "BR" and len(plats_ja) < 3:
             for item in _coletar_ofertas_ao_vivo(termo):
                 plat = item.get("plataforma")
                 if plat in plats_ja:
@@ -2482,51 +2657,73 @@ def gerar_lista_ofertas_reais(
                 if len(lista_produtos) > antes:
                     plats_ja.add(plat)
 
-    cats_ok = [c for c in CATALOGO_PRODUTOS_REAIS if _catalogo_compativel(termo, c)]
-    if cats_ok:
-        melhor = max(_score_catalogo(termo, c) for c in cats_ok)
-        cats_ok = [c for c in cats_ok if _score_catalogo(termo, c) == melhor]
-    for cat_item in cats_ok:
-        for of in cat_item["ofertas"]:
-            plat = of["plataforma"]
-            if plat in plats_ja:
-                continue
-            foto = of.get("foto") or ""
-            if not foto:
-                for irma in cat_item["ofertas"]:
-                    asin = _asin_amazon(irma.get("url") or "")
-                    if asin:
-                        foto = f"https://m.media-amazon.com/images/P/{asin}._AC_SL500_.jpg"
-                        break
-            item = _montar_item_oferta(
-                of["titulo"], of["preco"], of["url"], foto, plat,
-                full=of.get("full", False),
-            )
-            item["fonte"] = "catalogo"
-            if not _oferta_foto_preco_do_mesmo_item(item):
-                continue
-            _adicionar(item)
-            plats_ja.add(plat)
+    if pais == "BR":
+        cats_ok = [c for c in CATALOGO_PRODUTOS_REAIS if _catalogo_compativel(termo, c)]
+        if cats_ok:
+            melhor = max(_score_catalogo(termo, c) for c in cats_ok)
+            cats_ok = [c for c in cats_ok if _score_catalogo(termo, c) == melhor]
+        for cat_item in cats_ok:
+            for of in cat_item["ofertas"]:
+                plat = of["plataforma"]
+                if plat in plats_ja:
+                    continue
+                foto = of.get("foto") or ""
+                if not foto:
+                    for irma in cat_item["ofertas"]:
+                        asin = _asin_amazon(irma.get("url") or "")
+                        if asin:
+                            foto = f"https://m.media-amazon.com/images/P/{asin}._AC_SL500_.jpg"
+                            break
+                item = _montar_item_oferta(
+                    of["titulo"], of["preco"], of["url"], foto, plat,
+                    full=of.get("full", False),
+                    pais=pais,
+                )
+                item["fonte"] = "catalogo"
+                if not _oferta_foto_preco_do_mesmo_item(item):
+                    continue
+                _adicionar(item)
+                plats_ja.add(plat)
 
     plats_ja = {p.get("plataforma") for p in lista_produtos}
-    faltam = [p for p in ("mercado_livre", "amazon", "shopee") if p not in plats_ja]
+    faltam = [p for p in _lojas_do_pais(pais) if p not in plats_ja]
     if faltam:
-        for fb in _ofertas_fallback_lojas(termo):
+        for fb in _ofertas_fallback_lojas(termo, pais=pais):
             if fb.get("plataforma") in faltam:
                 lista_produtos.append(fb)
 
     if plataforma_chave:
         lista_produtos = [p for p in lista_produtos if p.get("plataforma") == plataforma_chave]
     lista_produtos = _ordenar_entrega_menor_preco(lista_produtos)
-    lista_produtos = _carimbar_lista_afiliado(lista_produtos)
+    lista_produtos = _carimbar_lista_afiliado(lista_produtos, pais=pais)
     if lista_produtos and usar_cache:
-        _gravar_cache_garimpo(termo, lista_produtos)
+        _gravar_cache_garimpo(termo, lista_produtos, pais=pais)
     if lista_produtos and usar_vivo:
         print(
             f"[Motor] menor preço entregue: {lista_produtos[0]['preco']} "
             f"em {lista_produtos[0].get('loja')}"
         )
     return lista_produtos
+
+
+def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, limite=20):
+    """Entrada da API: BR = Amazon/ML/Shopee; US = Amazon/eBay via Serper."""
+    termo = (termo or "").strip()
+    pais = _normalizar_pais(pais)
+    if not termo:
+        return []
+    if pais == "US":
+        ofertas = buscar_ofertas_serper_shopping(
+            termo, usar_cache=usar_cache, limite=limite, pais="US",
+        )
+        ofertas = _completar_lojas_serper(termo, ofertas, limite=limite, pais="US")
+        ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais="US"))
+        if ofertas and usar_cache:
+            _gravar_cache_garimpo(termo, ofertas, pais="US")
+        return ofertas
+    return gerar_lista_ofertas_reais(
+        termo, usar_cache=usar_cache, usar_vivo=usar_vivo, pais="BR",
+    )
 
 
 def buscar_ofertas_jds(termo):
@@ -3499,6 +3696,59 @@ def executar_testes_unitarios():
         "imageUrl": "https://http2.mlstatic.com/D_NQ_NP_artigo-O.jpg",
     }])
     checar(not artigo_ml, "organic de revista ML não entra no ranking")
+    loc_us = _serper_locale("US")
+    loc_br = _serper_locale("BR")
+    checar(loc_us == {"gl": "us", "hl": "en"}, "Serper EUA usa gl=us hl=en")
+    checar(loc_br == {"gl": "br", "hl": "pt-br"}, "Serper BR usa gl=br hl=pt-br")
+    checar(_source_loja_oficial("eBay", pais="US") and _source_loja_oficial("Amazon.com", pais="US"),
+           "filtro US aceita Amazon e eBay")
+    checar(not _source_loja_oficial("Shopee", pais="US") and not _source_loja_oficial("Mercado Livre", pais="US"),
+           "filtro US recusa Shopee e Mercado Livre")
+    tag_us = aplicar_tag_amazon_eua("https://www.amazon.com/dp/B0CQKLS4RP")
+    checar(f"tag={ID_AMAZON_US}" in tag_us and "amazon.com/" in tag_us, "tag Amazon EUA no /dp/")
+    sujo_us = aplicar_tag_amazon_eua("https://www.amazon.com/dp/B0CQKLS4RP?tag=outra-20")
+    checar(f"tag={ID_AMAZON_US}" in sujo_us and "outra-20" not in sujo_us,
+           "tag Amazon EUA substitui tag de terceiro")
+    br_no_us = aplicar_tag_amazon_eua("https://www.amazon.com.br/dp/B0CQKLS4RP")
+    checar(f"tag={ID_AMAZON}" in br_no_us and "jdseconomiza-20" not in br_no_us,
+           "amazon.com.br nunca recebe o ID dos EUA")
+    us_no_br = aplicar_tag_amazon_eua("https://www.amazon.com/dp/B0CQKLS4RP")
+    checar(f"tag={ID_AMAZON_US}" in us_no_br and "jdseconomiz0e-20" not in us_no_br,
+           "amazon.com nunca recebe o ID do Brasil")
+    us_mix = _ofertas_de_itens_serper("dualsense", [
+        {
+            "title": "DualSense Wireless Controller",
+            "source": "Amazon.com",
+            "price": "$69.99",
+            "extracted_price": 69.99,
+            "link": "https://www.amazon.com/dp/B0CQKLS4RP",
+            "imageUrl": "https://m.media-amazon.com/images/I/dual.jpg",
+        },
+        {
+            "title": "DualSense Sony PS5",
+            "source": "eBay",
+            "price": "$64.99",
+            "extracted_price": 64.99,
+            "link": "https://www.ebay.com/itm/123456789012",
+            "imageUrl": "https://i.ebayimg.com/images/g/teste/s-l1600.jpg",
+        },
+        {
+            "title": "Controle DualSense",
+            "source": "Mercado Livre",
+            "price": "R$ 419,00",
+            "link": "https://www.mercadolivre.com.br/dualsense/p/MLB32344506",
+            "imageUrl": "https://http2.mlstatic.com/D_NQ_NP_teste-O.jpg",
+        },
+    ], pais="US")
+    checar(
+        {p.get("plataforma") for p in us_mix} <= {"amazon", "ebay"}
+        and "mercado_livre" not in {p.get("plataforma") for p in us_mix},
+        "busca US só Amazon e eBay",
+    )
+    checar(
+        any(f"tag={ID_AMAZON_US}" in (p.get("url") or "") for p in us_mix if p.get("plataforma") == "amazon"),
+        "Amazon US carimba tracking ID",
+    )
     checar(not _preco_plausivel(
         "controle ps5", 292.78,
         "PlayStation DualSense Controle sem fio",

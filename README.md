@@ -2,7 +2,8 @@
 
 App de menor preço (Amazon, Mercado Livre, Shopee) com afiliados:
 
-- Amazon `tag=jdseconomiz0e-20`
+- Amazon Brasil `tag=jdseconomiz0e-20` (`AMAZON_PARTNER_TAG`)
+- Amazon EUA `tag=jdseconomiza-20` (`AMAZON_TAG_US`)
 - Shopee `sub_id=18381751263`
 - Mercado Livre `identity=mape592520`
 

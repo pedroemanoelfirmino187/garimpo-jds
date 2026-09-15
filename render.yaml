@@ -17,6 +17,8 @@ services:
         sync: false
       - key: AMAZON_PARTNER_TAG
         value: jdseconomiz0e-20
+      - key: AMAZON_TAG_US
+        value: jdseconomiza-20
       - key: SHOPEE_APP_ID
         sync: false
       - key: SHOPEE_SECRET

@@ -1,4 +1,7 @@
-"""API de busca da JDS Economiza — deploy no Railway."""
+"""API de busca da JDS Economiza — deploy no Railway.
+
+Módulo: api.main (uvicorn api.main:app ou uvicorn api:app).
+"""
 from __future__ import annotations
 
 import os
@@ -21,19 +24,21 @@ except ImportError:
 
 from garimpo_jds import (  # noqa: E402
     ID_AMAZON,
+    ID_AMAZON_US,
     ID_MERCADO_LIVRE,
     ID_SHOPEE,
     _carimbar_lista_afiliado,
     _chave_cache,
     _chaves_env,
+    _normalizar_pais,
+    buscar_ofertas_por_pais,
     buscar_ofertas_serper_shopping,
-    gerar_lista_ofertas_reais,
 )
 
 app = FastAPI(
     title="JDS Economiza API",
-    version="1.1.0",
-    description="Garimpa o menor preço no Google (Serper) em Amazon, Mercado Livre e Shopee.",
+    version="1.2.0",
+    description="Garimpa o menor preço no Google (Serper): BR (Amazon/ML/Shopee) ou US (Amazon/eBay).",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -45,6 +50,12 @@ app.add_middleware(
 
 class GarimpoPedido(BaseModel):
     q: str = Field(..., min_length=1, max_length=120, description="Produto buscado")
+    pais: str = Field(default="BR", max_length=16, description="BR ou US")
+    country: str | None = Field(default=None, max_length=16, description="Alias de pais")
+
+
+def _pais_pedido(pedido: GarimpoPedido) -> str:
+    return _normalizar_pais(pedido.country or pedido.pais or "BR")
 
 
 def _autorizar_app(
@@ -64,13 +75,15 @@ def _autorizar_app(
     return True
 
 
-def _resposta_ofertas(termo, ofertas):
-    lista = _carimbar_lista_afiliado(ofertas or [])
+def _resposta_ofertas(termo, ofertas, pais="BR"):
+    pais = _normalizar_pais(pais)
+    lista = _carimbar_lista_afiliado(ofertas or [], pais=pais)
     campeao = lista[0] if lista else None
     return {
         "termo": termo,
+        "pais": pais,
         "total": len(lista),
-        "cache": _chave_cache(termo),
+        "cache": _chave_cache(termo, pais=pais),
         "menor_preco": None if not campeao else {
             "preco": campeao.get("preco"),
             "loja": campeao.get("loja"),
@@ -87,6 +100,8 @@ def health():
         "ok": True,
         "servico": "jds-economiza",
         "afiliados": {
+            "amazon_br": ID_AMAZON,
+            "amazon_us": ID_AMAZON_US,
             "amazon": ID_AMAZON,
             "shopee": ID_SHOPEE,
             "mercado_livre": ID_MERCADO_LIVRE,
@@ -112,24 +127,29 @@ def health():
 @app.get("/garimpar")
 def garimpar_get(
     q: str = Query(..., min_length=1, max_length=120, description="Produto"),
+    pais: str = Query("BR", max_length=16, description="BR ou US"),
+    country: str | None = Query(None, max_length=16),
     _: bool = Depends(_autorizar_app),
 ):
     termo = q.strip()
-    ofertas = gerar_lista_ofertas_reais(termo, usar_cache=True)
-    return _resposta_ofertas(termo, ofertas)
+    mercado = _normalizar_pais(country or pais)
+    ofertas = buscar_ofertas_por_pais(termo, pais=mercado, usar_cache=True)
+    return _resposta_ofertas(termo, ofertas, pais=mercado)
 
 
 @app.post("/garimpar")
 def garimpar_post(pedido: GarimpoPedido, _: bool = Depends(_autorizar_app)):
-    """Rota do app móvel: corpo JSON, token opcional, Serper no servidor."""
+    """Rota do app: corpo JSON com q e pais (BR|US), token opcional, Serper no servidor."""
     termo = pedido.q.strip()
-    ofertas = gerar_lista_ofertas_reais(termo, usar_cache=True)
-    return _resposta_ofertas(termo, ofertas)
+    mercado = _pais_pedido(pedido)
+    ofertas = buscar_ofertas_por_pais(termo, pais=mercado, usar_cache=True)
+    return _resposta_ofertas(termo, ofertas, pais=mercado)
 
 
 @app.post("/shopping")
 def shopping_serper(pedido: GarimpoPedido, _: bool = Depends(_autorizar_app)):
-    """Só Google Shopping (Serper), cache antes da API, lojas oficiais."""
+    """Só Google Shopping (Serper), cache antes da API, lojas do país."""
     termo = pedido.q.strip()
-    ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=True)
-    return _resposta_ofertas(termo, ofertas)
+    mercado = _pais_pedido(pedido)
+    ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=True, pais=mercado)
+    return _resposta_ofertas(termo, ofertas, pais=mercado)
