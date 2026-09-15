@@ -589,6 +589,8 @@ def _parece_acessorio_barato(titulo, termo=""):
             "grip", "protector", "playvital", "anti-skid", "sweat",
             "dock", "carregador", "cabo", "analogico", "thumbstick",
             "base de carreg", "capa para controle", "skin", "silicone",
+            "suporte", "stand", "holder", "suporte controle",
+            "base para controle", "carregador de controle",
         )
     ):
         return True
@@ -1248,7 +1250,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 
 def _chave_cache(termo):
-    return "v11:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
+    return "v12:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
 
 
 def _ler_cache_garimpo(termo):
@@ -3433,8 +3435,9 @@ def executar_testes_unitarios():
         "redmi note 13", "Pb Para Xiaomi Redmi Note 13 Pro + Tela Amoled",
     ), "tela/peça não passa como celular")
     checar(not _titulo_relevante(
-        "controle ps5", "Gamrombo Controle sem fio de LED para PS5, compatível com PS",
-    ), "clone LED não passa como DualSense")
+        "controle ps5",
+        "Suporte Controle PS5 Playstation 5 DualSense | Shopee Brasil",
+    ), "suporte/base não passa como DualSense")
     checar(not _preco_plausivel(
         "controle ps5", 292.78,
         "PlayStation DualSense Controle sem fio",
