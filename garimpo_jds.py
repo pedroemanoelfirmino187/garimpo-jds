@@ -1461,7 +1461,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 
 def _chave_cache(termo):
-    return "v6:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
+    return "v7:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
 
 
 def _ler_cache_garimpo(termo):
@@ -1502,8 +1502,11 @@ def _gravar_cache_garimpo(termo, produtos):
 
 
 def _buscar_ofertas_ml_api(termo, limite=8):
-    """API do Mercado Livre — título, preço, foto e permalink da compra."""
+    """API do Mercado Livre — só tenta se existir token; senão usa catálogo/scrape."""
     if requests is None or not (termo or "").strip():
+        return []
+    token = (os.environ.get("MELI_ACCESS_TOKEN") or "").strip()
+    if not token:
         return []
     q = urllib.parse.quote(termo.strip())
     url = (
@@ -1514,10 +1517,8 @@ def _buscar_ofertas_ml_api(termo, limite=8):
     headers = {
         "User-Agent": "JDSEconomiza/1.0 (garimpo; +https://github.com/pedroemanoelfirmino187/garimpo-jds)",
         "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
     }
-    token = (os.environ.get("MELI_ACCESS_TOKEN") or "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
     try:
         resp = requests.get(url, timeout=12, headers=headers)
         if resp.status_code >= 400:
@@ -1661,6 +1662,8 @@ def _resposta_util_loja(url, texto):
         return False
     u = (url or "").lower()
     if "amazon." in u:
+        if "/dp/" in u or "/gp/product/" in u:
+            return "a-offscreen" in texto or "productTitle" in texto or "data-asin" in texto
         return "data-asin" in texto or "/dp/" in texto
     if "shopee.com.br/api" in u:
         return '"items"' in texto or '"item_basic"' in texto
@@ -1765,6 +1768,53 @@ def _buscar_ofertas_amazon_html(termo, limite=6):
         if oficiais:
             return oficiais
     return ofertas
+
+
+def _preco_de_html_amazon(html):
+    """Preço da vitrine (buy box) na página /dp/, nunca o riscado."""
+    if not html or BeautifulSoup is None:
+        return 0.0
+    soup = BeautifulSoup(html, "html.parser")
+    raiz = soup.select_one("#corePrice_feature_div, #apex_desktop, #ppd") or soup
+    for off in raiz.select("span.a-price > span.a-offscreen"):
+        pai = off.find_parent("span", class_="a-price")
+        classes = " ".join((pai.get("class") or []) if pai else [])
+        if "a-text-price" in classes:
+            continue
+        preco = _preco_para_numero(off.get_text(strip=True))
+        if preco > 0:
+            return preco
+    achado = re.search(r"R\$\s*[\d\.]+,\d{2}", raiz.get_text(" ", strip=True) if raiz else "")
+    return _preco_para_numero(achado.group(0)) if achado else 0.0
+
+
+def _atualizar_preco_pdp_amazon(item, termo):
+    """Atualiza só o ASIN do catálogo, nunca um resultado de busca genérico."""
+    asin = _asin_amazon((item or {}).get("url") or "")
+    if not asin or requests is None:
+        return item
+    html, origem = _baixar_url_loja(
+        f"https://www.amazon.com.br/dp/{asin}",
+        headers=HEADERS_GOOGLE,
+        timeout=8,
+        browser=True,
+    )
+    preco = _preco_de_html_amazon(html)
+    titulo = (item.get("titulo") or "").strip()
+    if preco > 0 and _preco_plausivel(termo, preco, titulo):
+        item["preco_num"] = float(preco)
+        item["preco"] = _formatar_preco(preco)
+        _marcar_fonte_scrape(item, origem)
+        print(f"[Motor] Amazon /dp/{asin} = {item['preco']}")
+    return item
+
+
+def _atualizar_catalogo_amazon_vivo(lista, termo):
+    amazon = [p for p in lista or [] if p.get("plataforma") == "amazon" and _asin_amazon(p.get("url") or "")]
+    if not amazon:
+        return
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda p: _atualizar_preco_pdp_amazon(p, termo), amazon))
 
 
 def _buscar_ofertas_shopee_api(termo, limite=6):
@@ -2141,17 +2191,17 @@ def gerar_lista_ofertas_reais(
     catalogo_ja = list(lista_produtos)
 
     if usar_vivo:
-        for item in _coletar_ofertas_ao_vivo(termo):
-            plat = item.get("plataforma")
-            if plat in plats_ja and item.get("fonte") not in {"oficial", "scrape"}:
-                continue
-            refs = [p for p in catalogo_ja if p.get("plataforma") == plat]
-            if refs and not any(_scrape_e_o_mesmo_produto(item, r) for r in refs):
-                continue
-            antes = len(lista_produtos)
-            _adicionar(item)
-            if len(lista_produtos) > antes:
-                plats_ja.add(plat)
+        if catalogo_ja:
+            _atualizar_catalogo_amazon_vivo(lista_produtos, termo)
+        else:
+            for item in _coletar_ofertas_ao_vivo(termo):
+                plat = item.get("plataforma")
+                if plat in plats_ja and item.get("fonte") not in {"oficial", "scrape"}:
+                    continue
+                antes = len(lista_produtos)
+                _adicionar(item)
+                if len(lista_produtos) > antes:
+                    plats_ja.add(plat)
 
     plats_ja = {p.get("plataforma") for p in lista_produtos}
     faltam = [p for p in ("mercado_livre", "amazon", "shopee") if p not in plats_ja]
@@ -2928,10 +2978,26 @@ def executar_testes_unitarios():
             print(f"[FALHA] {nome}")
             falhas.append(nome)
 
+    antigo_meli = os.environ.pop("MELI_ACCESS_TOKEN", None)
+    checar(_buscar_ofertas_ml_api("controle ps5") == [], "sem token ML não chama API oficial")
+    ml_sem_token = gerar_lista_ofertas_reais("controle ps5", usar_cache=False, usar_vivo=False)
+    checar(
+        any(p.get("plataforma") == "mercado_livre" for p in ml_sem_token),
+        "Mercado Livre continua no ranking sem token",
+    )
+    if antigo_meli:
+        os.environ["MELI_ACCESS_TOKEN"] = antigo_meli
     checar(gerar_lista_ofertas_reais("") == [], "busca vazia não inventa produto")
     fb = _ofertas_fallback_lojas("iphone 16")
     checar(len(fb) == 3 and all(p.get("url", "").startswith("http") for p in fb), "fallback sempre tem 3 lojas")
     checar(abs(_preco_para_numero("R$ 1.234,56") - 1234.56) < 0.01, "parser de preço BR")
+    checar(abs(_preco_de_html_amazon(
+        '<span class="a-price"><span class="a-offscreen">R$ 404,27</span></span>'
+        '<span class="a-price a-text-price"><span class="a-offscreen">R$ 499,90</span></span>'
+    ) - 404.27) < 0.01, "parser Amazon /dp/ ignora preço riscado")
+    html_capa = '<span class="a-price"><span class="a-offscreen">R$ 24,90</span></span>'
+    checar(abs(_preco_de_html_amazon(html_capa) - 24.90) < 0.01, "parser lê R$ 24,90 no HTML")
+    checar(not _preco_plausivel("redmi note 13", 24.90, "Xiaomi Redmi Note 13"), "R$ 24,90 não atualiza celular")
     checar(not _titulo_relevante(
         "controle ps5",
         "PlayVital Anti-Skid Sweat-Absorbent Grip for PS5 Edge Wireless Controller",
@@ -3145,7 +3211,7 @@ def executar_testes_motor_busca():
     ]
 
     resultados = {
-        "total_testes": len(termos_teste) + 1 + 500,
+        "total_testes": len(termos_teste) + 1 + 500 + 3,
         "sucesso": (0 if falhas_unit else 1) + (500 - falhas_carga),
         "falha": (1 if falhas_unit else 0) + falhas_carga,
         "detalhes": [],
@@ -3173,7 +3239,7 @@ def executar_testes_motor_busca():
         print("-" * 60)
 
         try:
-            produtos = gerar_lista_ofertas_reais(termo, usar_cache=False)
+            produtos = gerar_lista_ofertas_reais(termo, usar_cache=False, usar_vivo=False)
 
             if not produtos:
                 print(f"[FALHA] Nenhum produto encontrado para '{termo}'")
@@ -3304,6 +3370,45 @@ def executar_testes_motor_busca():
                 "status": "FALHA CRITICA",
                 "motivo": str(e),
             })
+
+    print("\n" + "=" * 80)
+    print("VIVO SEM API OFICIAL — /dp/ do catálogo + produto fora do catálogo")
+    print("=" * 80)
+    for i, (termo, piso) in enumerate((
+        ("controle ps5", 320.0),
+        ("redmi note 13", 199.0),
+        ("cabo usb tipo c", 5.0),
+    ), 1):
+        print(f"\n[Vivo {i}/3] '{termo}'")
+        try:
+            produtos = gerar_lista_ofertas_reais(termo, usar_cache=False, usar_vivo=True)
+            lojas = {p.get("plataforma") for p in produtos}
+            topo = produtos[0]["preco_num"] if produtos else 0
+            ok_lojas = {"amazon", "mercado_livre", "shopee"} <= lojas
+            ok_piso = topo >= piso
+            ok_compra = all(_oferta_pronta_para_compra(p) for p in produtos) if produtos else False
+            print(f"  lojas={lojas} topo={produtos[0].get('preco') if produtos else '-'} {produtos[0].get('loja') if produtos else ''}")
+            if produtos and ok_lojas and ok_piso and ok_compra:
+                resultados["sucesso"] += 1
+                print(f"[SUCESSO] Vivo {i} ({termo})")
+            else:
+                resultados["falha"] += 1
+                resultados["detalhes"].append({
+                    "teste": f"vivo-{i}",
+                    "termo": termo,
+                    "status": "FALHA",
+                    "motivo": f"lojas={ok_lojas} piso={ok_piso} compra={ok_compra} topo={topo}",
+                })
+                print(f"[FALHA] Vivo {i} ({termo})")
+        except Exception as e:
+            resultados["falha"] += 1
+            resultados["detalhes"].append({
+                "teste": f"vivo-{i}",
+                "termo": termo,
+                "status": "FALHA CRITICA",
+                "motivo": str(e),
+            })
+            print(f"[FALHA CRITICA] Vivo {i}: {e}")
 
     print("\n" + "=" * 80)
     print("RESUMO")
