@@ -42,6 +42,16 @@ JDS_API_URL=https://SEU-DOMINIO.up.railway.app
 
 Aí o Flet só pede o produto; o servidor garimpa.
 
+O app móvel chama:
+
+```text
+POST /garimpar
+Header: X-JDS-TOKEN: (o mesmo de JDS_API_TOKEN no Railway, se você configurar)
+Body: {"q": "smart tv 50"}
+```
+
+`POST /shopping` é só o Google via Serper (cache antes da API, Amazon/ML/Shopee). A chave Serper nunca sai do servidor.
+
 ## 4. Site Flet no ar (opcional)
 
 Segundo serviço no Railway, mesmo repo:
@@ -59,9 +69,10 @@ Scraping no servidor é bloqueado. Cole as chaves em **Railway → Variables** (
 | Amazon | [Associates](https://associados.amazon.com.br) → Product Advertising API | `AMAZON_ACCESS_KEY`, `AMAZON_SECRET_KEY`, `AMAZON_PARTNER_TAG=jdseconomiz0e-20` |
 | Shopee | [Afiliados](https://affiliate.shopee.com.br) → Open API | `SHOPEE_APP_ID`, `SHOPEE_SECRET` |
 | Mercado Livre | [developers.mercadolivre.com.br](https://developers.mercadolivre.com.br) | `MELI_ACCESS_TOKEN` |
+| Google (Serper) | [serper.dev](https://serper.dev) | `SERPER_API_KEY` |
 | ZenRows (grátis) | [zenrows.com](https://www.zenrows.com) | `ZENROWS_API_KEY` |
 | ScrapingAnt (grátis) | [scrapingant.com](https://scrapingant.com) | `SCRAPINGANT_API_KEY` |
 
-O motor tenta a loja direto; se bloquear, **ZenRows**; se falhar, **ScrapingAnt** (não gasta as duas na mesma página).
+No ar o motor pede o Google pela **Serper** (JSON, sem raspar). Sem essa chave o Google continua bloqueado no Railway. ZenRows/ScrapingAnt ficam de reserva.
 
-Depois do deploy, `/health` mostra `zenrows` e `scrapingant` como `true` quando as chaves estão no Railway.
+Depois do deploy, `/health` mostra `serper` como `true` quando `SERPER_API_KEY` está no Railway.

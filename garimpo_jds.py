@@ -9,9 +9,9 @@ import io
 import os
 import random
 import re
+import subprocess
 import sys
 import urllib.parse
-import urllib.request
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -155,6 +155,22 @@ def gerar_link_afiliado(url_original, plataforma):
         return url_original
 
 
+def _preco_serper_para_float(texto):
+    """Converte 'R$ 1.799,00' em 1799.00 — tira R$, milhar e vírgula."""
+    return _preco_para_numero(texto)
+
+
+def _source_loja_oficial(source):
+    s = (source or "").lower()
+    return (
+        "mercado livre" in s
+        or "mercadolivre" in s
+        or "mercado libre" in s
+        or "amazon" in s
+        or "shopee" in s
+    )
+
+
 def _preco_para_numero(texto):
     if texto is None:
         return 0.0
@@ -199,12 +215,24 @@ NOMES_LOJA = {
 
 
 def _link_busca_shopee(termo):
-    """Busca do produto na Shopee, do menor preço para o maior, sem login."""
+    """Busca do produto na Shopee (mais vendidos), sem login — evita capa/cabo no topo."""
     q = urllib.parse.quote((termo or "ofertas").strip())
     return (
         f"https://shopee.com.br/search?keyword={q}"
+        f"&sortBy=sales"
         f"&utm_source=an_{ID_SHOPEE}&utm_medium=affiliates&sub_id={ID_SHOPEE}"
     )
+
+
+def _consulta_shopee(produto):
+    """Usa o título do card (o produto), não só o termo curto da busca."""
+    p = produto or {}
+    return (p.get("titulo") or p.get("termo_busca") or "ofertas").strip()
+
+
+def _consulta_do_card(produto):
+    p = produto or {}
+    return (p.get("termo_busca") or p.get("titulo") or "ofertas").strip()
 
 
 def _link_busca_ml(termo):
@@ -225,33 +253,31 @@ def _link_busca_amazon(termo):
     )
 
 
+def _anuncio_veio_do_google(produto):
+    fonte = ((produto or {}).get("fonte") or "").lower()
+    return fonte in {"google", "scrape", "oficial"}
+
+
 def _link_compra_do_card(produto):
-    """Abre a página de compra daquele card; se houver /dp/ ou /p/, vai direto."""
-    url = (produto or {}).get("url") or ""
+    """Ver Oferta: página da loja já ordenada pelo menor preço daquele produto."""
     plat = (produto or {}).get("plataforma")
-    titulo = (produto or {}).get("titulo") or "ofertas"
-    if _eh_pagina_compra(url, plat):
-        return _aplicar_afiliado_google(url, plat)
-    if plat == "shopee":
-        return _link_busca_shopee(titulo)
+    url = (produto or {}).get("url") or ""
+    q = _consulta_do_card(produto)
+    if plat == "amazon" and _asin_amazon(url) == ASIN_DUALSENSE:
+        return _aplicar_afiliado_google(
+            f"https://www.amazon.com.br/dp/{ASIN_DUALSENSE}", "amazon",
+        )
     if plat == "amazon":
-        return _link_busca_amazon(titulo)
+        return _link_busca_amazon(q)
     if plat == "mercado_livre":
-        return _link_busca_ml(titulo)
-    return url
+        return _link_busca_ml(q)
+    if plat == "shopee":
+        return _link_busca_shopee(_consulta_shopee(produto))
+    return _aplicar_afiliado_google(url, plat)
 
 
 def _nome_loja(plataforma):
     return NOMES_LOJA.get(plataforma, "Loja")
-
-
-def _eh_link_generico(url):
-    u = (url or "").lower()
-    if not u:
-        return True
-    if "google." in u or u.startswith("/url?"):
-        return True
-    return False
 
 
 def _eh_link_produto(url, plataforma):
@@ -267,19 +293,6 @@ def _eh_link_produto(url, plataforma):
     if plataforma == "shopee":
         return "shopee.com.br/search" in u or "-i." in u or "/product/" in u
     return False
-
-
-def _limpar_rastreio_google(url):
-    try:
-        parsed = urllib.parse.urlparse(url)
-        qs = urllib.parse.parse_qs(parsed.query)
-        for chave in list(qs):
-            if chave.lower() in {"sa", "ved", "usg", "ust", "source", "ei", "oq", "gs_lcrp"}:
-                qs.pop(chave, None)
-        nova = urllib.parse.urlencode(qs, doseq=True)
-        return urllib.parse.urlunparse(parsed._replace(query=nova))
-    except Exception:
-        return url
 
 
 def _extrair_foto(img_tag):
@@ -298,114 +311,6 @@ def _extrair_foto(img_tag):
     return None
 
 
-def _extrair_preco_google(texto):
-    """Extrai preço de texto usando regex"""
-    if not texto:
-        return None
-    # Padrões de preço: R$ 123,45 ou R$123.45 ou 123,45 ou 123.45
-    padroes = [
-        r"R\$\s*([\d\.]+,\d{2})",  # R$ 123,45
-        r"R\$\s*([\d\.]+\.\d{2})",  # R$ 123.45
-        r"([\d\.]+,\d{2})",  # 123,45
-        r"([\d\.]+\.\d{2})",  # 123.45
-    ]
-    for padrao in padroes:
-        match = re.search(padrao, texto)
-        if match:
-            return match.group(1)
-    return None
-
-
-def _desempacotar_link_direto_google(link_href):
-    """
-    Desempacota links redirecionados do Google (/url?q=... ou /url?url=...)
-    e extrai o link direto exato da loja sem parâmetros de rastreio de busca do Google.
-    """
-    if not link_href:
-        return ""
-    link_limpo = link_href.strip()
-    if link_limpo.startswith("/url?"):
-        parsed = urllib.parse.urlparse(link_limpo)
-        qs = urllib.parse.parse_qs(parsed.query)
-        if "q" in qs and qs["q"]:
-            link_limpo = qs["q"][0]
-        elif "url" in qs and qs["url"]:
-            link_limpo = qs["url"][0]
-    # Se ainda tiver codificação percentual
-    if "%3A%2F%2F" in link_limpo or "%2F" in link_limpo:
-        link_limpo = urllib.parse.unquote(link_limpo)
-    if link_limpo.startswith("/"):
-        return ""
-    return _limpar_rastreio_google(link_limpo)
-
-
-def _escopo_mesmo_bloco_preco(bloco):
-    """Sobe no DOM até o envelope que junta preço, link e imagem do mesmo resultado."""
-    if not bloco:
-        return None
-    texto = bloco.get_text(" ", strip=True)
-    no_preco = None
-    for no in bloco.find_all(string=re.compile(r"R\$\s*\d")):
-        no_preco = no.parent
-        break
-    if no_preco is None:
-        return bloco
-    atual = no_preco
-    for _ in range(8):
-        if atual is None or atual is bloco.parent:
-            break
-        tem_img = atual.find("img") is not None
-        tem_link = atual.find("a", href=True) is not None
-        if tem_img and tem_link and "R$" in atual.get_text():
-            return atual
-        atual = atual.parent
-    return bloco
-
-
-def _extrair_foto_estrita_do_bloco(bloco):
-    """
-    Captura a tag img estritamente envelopada no mesmo bloco do produto e do preço.
-    """
-    escopo = _escopo_mesmo_bloco_preco(bloco) or bloco
-    rejeitar = (
-        "favicon",
-        "google.com/images/branding",
-        "cleardot.gif",
-        "gstatic.com/images/branding",
-        "logo",
-        "sprite",
-    )
-    for img in escopo.select("img"):
-        valor = _extrair_foto(img)
-        if not valor:
-            continue
-        baixa = valor.lower()
-        if any(p in baixa for p in rejeitar) or baixa.endswith(".svg"):
-            continue
-        return valor
-    return None
-
-
-def _extrair_href_produto_do_bloco(bloco):
-    """Pega o href direto da oferta no mesmo envelope do título/preço."""
-    escopo = _escopo_mesmo_bloco_preco(bloco) or bloco
-    candidatos = []
-    a_titulo = escopo.select_one("a:has(h3), div.yuRUbf > a, a.zReHs")
-    if a_titulo:
-        candidatos.append(a_titulo)
-    candidatos.extend(escopo.select("a[href]"))
-    vistos = set()
-    for a in candidatos:
-        href = _desempacotar_link_direto_google(a.get("href") or "")
-        if not href or href in vistos:
-            continue
-        vistos.add(href)
-        plat = _detectar_plataforma_google(href)
-        if plat != "outro" and _eh_link_produto(href, plat):
-            return href, plat
-    return "", "outro"
-
-
 def _eh_pagina_compra(url, plat):
     u = (url or "").lower()
     if plat == "amazon":
@@ -416,6 +321,7 @@ def _eh_pagina_compra(url, plat):
             or "/mlb" in u
             or "produto.mercadolivre." in u
             or "produto.mercadolibre." in u
+            or "orderid_price" in u
         )
     if plat == "shopee":
         return (
@@ -493,6 +399,8 @@ def _foto_da_oferta(url, plat, foto_hint=""):
     if _foto_e_generica(hint):
         return ""
     baixa = hint.lower()
+    if any(p in baixa for p in ("gstatic.com", "googleusercontent.com", "encrypted-tbn")):
+        return hint
     if plat == "mercado_livre" and "mlstatic" in baixa:
         return hint.replace("-I.jpg", "-O.jpg").replace("-I.webp", "-O.webp")
     if plat == "shopee" and ("cf.shopee" in baixa or "shopee" in baixa):
@@ -517,14 +425,20 @@ def _oferta_foto_preco_do_mesmo_item(item):
         return False
     if preco <= 0 or _foto_e_generica(foto):
         return False
+    if not _eh_link_produto(url, plat):
+        return False
+    if _anuncio_veio_do_google(item):
+        return True
+    f = (foto or "").lower()
+    if "gstatic.com" in f or "googleusercontent.com" in f or "encrypted-tbn" in f:
+        return True
     if plat == "amazon":
-        return bool(_asin_amazon(url)) and (
-            "media-amazon" in foto or "ssl-images-amazon" in foto or "amazon" in foto
-        )
+        if _asin_amazon(url):
+            return "media-amazon" in f or "ssl-images-amazon" in f or "amazon" in f
+        return "/s?" in url.lower()
     if plat == "mercado_livre":
-        return "mlstatic" in foto.lower() or "media-amazon" in foto.lower()
+        return "mlstatic" in f or "media-amazon" in f
     if plat == "shopee":
-        f = foto.lower()
         return "shopee" in f or "cf.shopee" in f or "media-amazon" in f
     return False
 
@@ -541,6 +455,7 @@ def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NO
     else:
         url_final = _aplicar_afiliado_google(url, plat)
     foto_final = _foto_da_oferta(url_final, plat, foto) or _foto_da_oferta(url, plat, foto)
+    url_final = _aplicar_afiliado_google(url_final, plat)
     return {
         "titulo": titulo,
         "preco": _formatar_preco(preco_num),
@@ -777,48 +692,36 @@ def _raspar_cards_mercado_livre(termo_busca, limite=6):
     return produtos
 
 
-def _detectar_plataforma_google(url):
-    """Detecta plataforma baseada na URL"""
-    url_lower = url.lower()
-    if "mercadolivre" in url_lower or "mercadolibre" in url_lower:
-        return "mercado_livre"
-    elif "shopee" in url_lower or "shp.ee" in url_lower:
-        return "shopee"
-    elif "amazon" in url_lower:
-        return "amazon"
-    return "outro"
-
-
-def _aplicar_afiliado_google(link_loja, plataforma):
-    """
-    Carimbo de afiliados seguro da JDS Economiza:
-    - Shopee: sub_id=18381751263
-    - Amazon: tag=jdseconomiz0e-20
-    """
-    try:
-        url_limpa = (link_loja or "").strip()
-        if not url_limpa:
-            return ""
-
-        if plataforma == "mercado_livre":
-            if f"identity={ID_MERCADO_LIVRE}" in url_limpa:
-                return url_limpa
-            sep = "&" if "?" in url_limpa else "?"
-            return f"{url_limpa}{sep}identity={ID_MERCADO_LIVRE}"
-        elif plataforma == "shopee":
-            if f"sub_id={ID_SHOPEE}" in url_limpa or f"affiliate_id={ID_SHOPEE}" in url_limpa:
-                return url_limpa
-            sep = "&" if "?" in url_limpa else "?"
-            return f"{url_limpa}{sep}sub_id={ID_SHOPEE}"
-        elif plataforma == "amazon":
-            if f"tag={ID_AMAZON}" in url_limpa:
-                return url_limpa
-            sep = "&" if "?" in url_limpa else "?"
-            return f"{url_limpa}{sep}tag={ID_AMAZON}"
+def _aplicar_afiliado_google(link_loja, plataforma=None):
+    """Todo link de loja sai com afiliado JDS (substitui tag de terceiros)."""
+    url_limpa = (link_loja or "").strip()
+    if not url_limpa.startswith("http"):
         return url_limpa
+    plat = plataforma or _plataforma_loja(url_limpa)
+    if plat not in {"amazon", "shopee", "mercado_livre"}:
+        plat = _detectar_plataforma(url_limpa)
+    try:
+        parsed = urllib.parse.urlparse(url_limpa)
+        qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        if plat == "amazon":
+            qs["tag"] = [ID_AMAZON]
+        elif plat == "mercado_livre":
+            qs["identity"] = [ID_MERCADO_LIVRE]
+        elif plat == "shopee":
+            qs["sub_id"] = [ID_SHOPEE]
+            qs["utm_source"] = [f"an_{ID_SHOPEE}"]
+            qs["utm_medium"] = ["affiliates"]
+            if "shopee.com.br/search" in url_limpa.lower():
+                qs["sortBy"] = ["sales"]
+                qs.pop("order", None)
+        else:
+            return url_limpa
+        return urllib.parse.urlunparse(parsed._replace(
+            query=urllib.parse.urlencode(qs, doseq=True),
+        ))
     except Exception as e:
         print(f"[Aviso] Erro ao aplicar afiliado: {e}")
-        return link_loja
+        return url_limpa
 
 
 # Catálogo oficial de produtos 100% reais com fotos de estúdio autênticas e links diretos
@@ -1245,132 +1148,6 @@ CATALOGO_PRODUTOS_REAIS = [
     },
 ]
 
-# Base de dados de fotos reais temáticas em alta resolução (100% testadas e verificadas)
-FOTOS_CATEGORIAS = {
-    "garrafa": [
-        "https://images.unsplash.com/photo-1544816155-12df9643f363?w=600&auto=format&fit=crop&q=80",
-    ],
-    "fone": [
-        "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=600&auto=format&fit=crop&q=80",
-    ],
-    "relogio": [
-        "https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=600&auto=format&fit=crop&q=80",
-    ],
-    "tenis": [
-        "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&auto=format&fit=crop&q=80",
-    ],
-    "smartphone": [
-        "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=600&auto=format&fit=crop&q=80",
-    ],
-    "notebook": [
-        "https://images.unsplash.com/photo-1496181133206-80ce9b88a853?w=600&auto=format&fit=crop&q=80",
-    ],
-    "televisao": [
-        "https://images.unsplash.com/photo-1593784991095-a205069470b6?w=600&auto=format&fit=crop&q=80",
-    ],
-        "camera": [
-            "https://images.unsplash.com/photo-1516035069371-29a1b244cc32?w=600&auto=format&fit=crop&q=80",
-        ],
-    "headset": [
-        "https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=600&auto=format&fit=crop&q=80",
-    ],
-    "mouse": [
-        "https://images.unsplash.com/photo-1615663245857-ac93bb7c39e7?w=600&auto=format&fit=crop&q=80",
-    ],
-    "controle": [
-        "https://images.unsplash.com/photo-1606144042614-b2417e99c4e3?w=600&auto=format&fit=crop&q=80",
-    ],
-    "cozinha": [
-        "https://images.unsplash.com/photo-1584269600464-37b1b58a9fe7?w=600&auto=format&fit=crop&q=80",
-    ],
-    "whey": [
-        "https://images.unsplash.com/photo-1593095948071-474c5cc2989d?w=600&auto=format&fit=crop&q=80",
-    ],
-    "roupa": [
-        "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&auto=format&fit=crop&q=80",
-    ],
-    "perfume": [
-        "https://images.unsplash.com/photo-1523293182086-7651a899d37f?w=600&auto=format&fit=crop&q=80",
-    ],
-    "livro": [
-        "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=600&auto=format&fit=crop&q=80",
-    ],
-    "som": [
-        "https://images.unsplash.com/photo-1545454675-3531b543be5d?w=600&auto=format&fit=crop&q=80",
-    ],
-    "cadeira": [
-        "https://images.unsplash.com/photo-1586023492125-27b2c045efd7?w=600&auto=format&fit=crop&q=80",
-    ],
-    "mochila": [
-        "https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=600&auto=format&fit=crop&q=80",
-    ],
-    "bicicleta": [
-        "https://images.unsplash.com/photo-1485965120184-e220f721d03e?w=600&auto=format&fit=crop&q=80",
-    ],
-    "ferramenta": [
-        "https://images.unsplash.com/photo-1584269600464-37b1b58a9fe7?w=600&auto=format&fit=crop&q=80",
-    ],
-    "brinquedo": [
-        "https://images.unsplash.com/photo-1606144042614-b2417e99c4e3?w=600&auto=format&fit=crop&q=80",
-    ],
-    "ventilador": [
-        "https://images.unsplash.com/photo-1584269600464-37b1b58a9fe7?w=600&auto=format&fit=crop&q=80",
-    ],
-}
-
-# Mapeamento de sinônimos e termos para cada categoria
-SINONIMOS_CATEGORIAS = [
-    (["garrafa", "copo", "stanley", "termica",
-     "térmica", "squeeze", "cantil"], "garrafa"),
-    (["fone", "headphone", "earphone", "airpod", "tws", "earbud", "ouvido"], "fone"),
-    (["relogio", "relógio", "smartwatch", "pulseira",
-     "mormaii", "apple watch", "galaxy watch"], "relogio"),
-    (["tenis", "tênis", "sapato", "calcado", "calçado",
-     "sneaker", "nike", "adidas", "chuteira"], "tenis"),
-    (["celular", "smartphone", "iphone", "samsung",
-     "xiaomi", "motorola", "galaxy"], "smartphone"),
-    (["notebook", "laptop", "computador", "macbook",
-     "dell", "lenovo", "acer", "pc"], "notebook"),
-    (["tv", "televisao", "televisão", "smart tv",
-     "monitor", "oled", "qled"], "televisao"),
-    (["controle", "ps5", "playstation", "xbox", "joystick",
-     "gamepad", "dualsense", "switch", "nintendo"], "controle"),
-    (["air fryer", "fritadeira", "panela", "cafeteira", "liquidificador",
-     "cozinha", "fogao", "fogão", "microondas", "grill"], "cozinha"),
-    (["whey", "creatina", "suplemento", "proteina", "proteína",
-     "bcaa", "termogenico", "termogênico"], "whey"),
-    (["camisa", "camiseta", "calca", "calça", "jaqueta",
-     "vestido", "roupa", "moletom", "bermuda"], "roupa"),
-    (["perfume", "colonia", "colônia", "fragrancia", "fragrância",
-     "hidratante", "creme", "maquiagem", "batom", "skincare"], "perfume"),
-    (["livro", "livros", "kindle", "manga", "mangá", "leitura"], "livro"),
-    (["caixa de som", "som", "alexa", "echo", "jbl", "speaker", "bluetooth"], "som"),
-    (["cadeira", "cadeira gamer", "mesa", "mesa gamer",
-     "escritorio", "escritório"], "cadeira"),
-    (["mochila", "bolsa", "mala", "carteira", "oculos", "óculos"], "mochila"),
-    (["bicicleta", "bike", "patinete", "skate", "esporte"], "bicicleta"),
-    (["ferramenta", "furadeira", "parafusadeira", "trena"], "ferramenta"),
-    (["brinquedo", "lego", "boneco", "jogo"], "brinquedo"),
-    (["mouse", "mousepad", "teclado", "gamer", "setup"], "mouse"),
-    (["camera", "câmera", "drone", "gopro", "filmagem"], "camera"),
-    (["ventilador", "ar condicionado", "climatizador"], "ventilador"),
-]
-
-
-def _obter_lista_fotos_categoria(termo):
-    t_low = (termo or "").lower()
-    for termos_sinonimos, cat_chave in SINONIMOS_CATEGORIAS:
-        for s in termos_sinonimos:
-            if s in t_low:
-                return FOTOS_CATEGORIAS.get(cat_chave, FOTOS_CATEGORIAS["smartphone"])
-    return FOTOS_CATEGORIAS["smartphone"]
-
-
-def _obter_foto_categoria(termo, indice=0):
-    lista_f = _obter_lista_fotos_categoria(termo)
-    return lista_f[indice % len(lista_f)]
-
-
 def _obter_preco_base_categoria(termo):
     t_low = (termo or "").lower()
     if any(k in t_low for k in ["smartphone", "celular", "iphone", "xiaomi", "redmi", "galaxy"]):
@@ -1461,7 +1238,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 
 def _chave_cache(termo):
-    return "v7:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
+    return "v10:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
 
 
 def _ler_cache_garimpo(termo):
@@ -1589,6 +1366,10 @@ def _zenrows_baixar(url):
                     "url": url,
                     "mode": "auto",
                     "proxy_country": "br",
+                    **({
+                        "js_render": "true",
+                        "wait": "5000",
+                    } if "google." in (url or "").lower() else {}),
                 },
                 timeout=28,
             )
@@ -1654,6 +1435,10 @@ def _pagina_bloqueada(texto):
         "api-services-support@amazon.com",
         "sorry, we just need to make sure you're not a robot",
         "enter the characters you see below",
+        "unusual traffic",
+        "detected unusual traffic",
+        "/sorry/",
+        "our systems have detected",
     ))
 
 
@@ -1665,6 +1450,14 @@ def _resposta_util_loja(url, texto):
         if "/dp/" in u or "/gp/product/" in u:
             return "a-offscreen" in texto or "productTitle" in texto or "data-asin" in texto
         return "data-asin" in texto or "/dp/" in texto
+    if "google." in u:
+        t = texto.lower()
+        if any(p in t for p in ("unusual traffic", "detected unusual", "/sorry/", "not a robot")):
+            return False
+        tem_preco = "r$" in t or "r\\u0024" in t or "r$\\u00a0" in t
+        tem_loja = "amazon.com.br" in t or "mercadolivre.com.br" in t or "shopee.com.br" in t
+        tem_card = "sh-dgr" in t or "sh-pr__" in t
+        return tem_preco or (tem_loja and tem_card) or (tem_preco and tem_loja)
     if "shopee.com.br/api" in u:
         return '"items"' in texto or '"item_basic"' in texto
     if "mercadolivre." in u or "mercadolibre." in u:
@@ -1672,12 +1465,28 @@ def _resposta_util_loja(url, texto):
     return True
 
 
-def _baixar_url_loja(url, headers=None, timeout=8, browser=False):
+_SESSAO_HTTP = None
+
+
+def _sessao_http():
+    global _SESSAO_HTTP
+    if requests is None:
+        return None
+    if _SESSAO_HTTP is None:
+        _SESSAO_HTTP = requests.Session()
+        _SESSAO_HTTP.headers.update(HEADERS_GOOGLE)
+        _SESSAO_HTTP.cookies.set("CONSENT", "YES+cb.20240516-17-p0.pt-BR+FX+123")
+        _SESSAO_HTTP.cookies.set("SOCS", "CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjQwNTE2X3AwGgJlbiACGgYI")
+    return _SESSAO_HTTP
+
+
+def _baixar_url_loja(url, headers=None, timeout=8, browser=False, avisar=True):
     """Tenta direto; se a página for bloqueio, ZenRows; se falhar, ScrapingAnt."""
     if requests is None:
         return "", ""
     try:
-        resp = requests.get(url, headers=headers or HEADERS_GOOGLE, timeout=timeout)
+        sess = _sessao_http()
+        resp = sess.get(url, headers=headers or HEADERS_GOOGLE, timeout=timeout)
         corpo = resp.text if resp.status_code < 400 else ""
         if _resposta_util_loja(url, corpo):
             return corpo, "direto"
@@ -1685,14 +1494,429 @@ def _baixar_url_loja(url, headers=None, timeout=8, browser=False):
         print(f"[HTTP loja] {e}")
     zen = _zenrows_baixar(url)
     if _resposta_util_loja(url, zen):
-        print("[Motor] página via ZenRows")
+        if avisar:
+            print("[Motor] página via ZenRows")
         return zen, "zenrows"
-    print("[ZenRows] sem página útil — usando ScrapingAnt")
+    if avisar:
+        print("[ZenRows] sem página útil — usando ScrapingAnt")
     ant = _scrapingant_baixar(url, browser=browser)
     if _resposta_util_loja(url, ant):
-        print("[Motor] página via ScrapingAnt")
+        if avisar:
+            print("[Motor] página via ScrapingAnt")
         return ant, "scrapingant"
     return "", ""
+
+
+def _html_google_legivel(html):
+    t = html or ""
+    return (
+        t.replace("\\u003d", "=")
+        .replace("\\u0026", "&")
+        .replace("\\u002f", "/")
+        .replace("\\u003c", "<")
+        .replace("\\u003e", ">")
+        .replace("\\/", "/")
+        .replace("&amp;", "&")
+    )
+
+
+def _loja_do_texto(texto):
+    t = _sem_acento(texto or "")
+    if "amazon" in t:
+        return "amazon"
+    if "shopee" in t:
+        return "shopee"
+    if "mercado livre" in t or "mercadolivre" in t or "mercado libre" in t:
+        return "mercado_livre"
+    return ""
+
+
+def _primeira_url_loja(texto):
+    blob = _html_google_legivel(texto or "")
+    blob = urllib.parse.unquote(blob)
+    padroes = (
+        r"https?://(?:www\.)?amazon\.com\.br[^\"'\s<>]*?/(?:dp|gp/product)/[A-Z0-9]{10}",
+        r"https?://(?:www\.|produto\.)?mercado(?:livre|libre)\.com\.br[^\"'\s<>]+",
+        r"https?://(?:s\.)?shopee\.com\.br[^\"'\s<>]+",
+    )
+    for padrao in padroes:
+        achado = re.search(padrao, blob, re.I)
+        if achado:
+            url = achado.group(0).rstrip(").,;]")
+            if _plataforma_loja(url):
+                return url.split("#")[0]
+    return ""
+
+
+def _desempacotar_link_google(href):
+    """Tira o redirecionamento do Google e devolve o link da loja."""
+    if not href:
+        return ""
+    h = href.strip().replace("&amp;", "&")
+    if h.startswith("//"):
+        h = "https:" + h
+    if h.startswith("/url?") or h.startswith("/aclk?"):
+        h = "https://www.google.com" + h
+    loja_embutida = _primeira_url_loja(h)
+    if loja_embutida:
+        return loja_embutida
+    if "google." in h.lower() and ("/url?" in h or "url=" in h or "adurl=" in h or "q=" in h):
+        parsed = urllib.parse.urlparse(h)
+        qs = urllib.parse.parse_qs(parsed.query)
+        for chave in ("q", "url", "adurl", "u"):
+            cand = (qs.get(chave) or [""])[0]
+            if cand.startswith("http"):
+                h = cand
+                break
+    if "%3A%2F%2F" in h:
+        h = urllib.parse.unquote(h)
+    loja_embutida = _primeira_url_loja(h)
+    if loja_embutida:
+        return loja_embutida
+    if not h.startswith("http"):
+        return ""
+    if "google." in h.lower() and not _plataforma_loja(h):
+        return ""
+    return h.split("#")[0]
+
+
+def _plataforma_loja(url):
+    baixa = (url or "").lower()
+    if "amazon." in baixa:
+        return "amazon"
+    if "shopee." in baixa or "shp.ee" in baixa:
+        return "shopee"
+    if "mercadolivre." in baixa or "mercadolibre." in baixa:
+        return "mercado_livre"
+    return ""
+
+
+def _foto_placeholder_loja(plat):
+    if plat == "amazon":
+        return "https://m.media-amazon.com/images/G/32/social_share/amazon_logo._CB149932011_.png"
+    if plat == "mercado_livre":
+        return "https://http2.mlstatic.com/frontend-assets/ml-web-navigation/navbar-assets/icon-logo-mercado-libre.png"
+    if plat == "shopee":
+        return "https://deo.shopeemobile.com/shopee/shopee-pcmall-live-sg/assets/icon_favicon.png"
+    return ""
+
+
+def _item_google(termo, titulo, preco, href, foto, plat, origem=""):
+    if not plat:
+        plat = _plataforma_loja(href) or _loja_do_texto(titulo)
+    if not plat or preco <= 0:
+        return None
+    if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo):
+        return None
+    if not href or not _eh_link_produto(href, plat):
+        if plat == "amazon":
+            href = _link_busca_amazon(termo)
+        elif plat == "mercado_livre":
+            href = _link_busca_ml(termo)
+        elif plat == "shopee":
+            href = _link_busca_shopee(termo)
+        else:
+            return None
+    foto = (foto or "").strip()
+    if foto.startswith("//"):
+        foto = "https:" + foto
+    item = _montar_item_oferta(titulo, preco, href, foto, plat)
+    item["fonte"] = "google"
+    _marcar_fonte_scrape(item, origem)
+    item["fonte"] = "google"
+    if _foto_e_generica(item.get("foto") or ""):
+        item["foto"] = foto if not _foto_e_generica(foto) else _foto_placeholder_loja(plat)
+    if not _oferta_foto_preco_do_mesmo_item(item):
+        return None
+    return item
+
+
+def _parsear_ofertas_google(html, termo, origem="", limite=8):
+    if not html or BeautifulSoup is None:
+        return []
+    soup = BeautifulSoup(_html_google_legivel(html), "html.parser")
+    ofertas = []
+    vistos = set()
+
+    def _guardar(item):
+        if not item:
+            return
+        plat = item.get("plataforma")
+        if plat in vistos:
+            atual = next((p for p in ofertas if p.get("plataforma") == plat), None)
+            if atual and item["preco_num"] < atual["preco_num"]:
+                ofertas.remove(atual)
+                ofertas.append(item)
+            return
+        vistos.add(plat)
+        ofertas.append(item)
+
+    for a in soup.select("a[href]"):
+        href_raw = a.get("href") or a.get("data-href") or a.get("data-url") or ""
+        href = _desempacotar_link_google(href_raw) or _primeira_url_loja(str(a))
+        bloco = a
+        texto_bloco = ""
+        for _ in range(8):
+            if bloco is None:
+                break
+            texto_bloco = bloco.get_text(" ", strip=True)
+            if "R$" in texto_bloco:
+                break
+            bloco = bloco.parent
+        plat = _plataforma_loja(href) or _loja_do_texto(texto_bloco) or _loja_do_texto(a.get_text(" ", strip=True))
+        if not plat:
+            continue
+        titulo_el = None
+        if bloco:
+            titulo_el = bloco.select_one("h3, h4, .tAxDx, .sh-np-title, [role='heading']")
+        titulo = (titulo_el.get_text(" ", strip=True) if titulo_el else "") or (a.get_text(" ", strip=True) or "")
+        titulo = re.sub(r"\s+", " ", titulo).strip()[:180] or termo
+        preco = 0.0
+        achado = re.search(r"R\$\s*[\d\.]+,\d{2}", texto_bloco or "")
+        if achado:
+            preco = _preco_para_numero(achado.group(0))
+        if preco <= 0:
+            continue
+        foto = ""
+        if bloco:
+            img = bloco.select_one("img")
+            foto = _extrair_foto(img) if img else ""
+        _guardar(_item_google(termo, titulo, preco, href, foto, plat, origem))
+        if len(ofertas) >= limite:
+            break
+
+    if len(ofertas) < 3:
+        blob = _html_google_legivel(html)
+        for m in re.finditer(
+            r"(https?://(?:www\.)?amazon\.com\.br[^\"'\s<>]*?/(?:dp|gp/product)/[A-Z0-9]{10})"
+            r".{0,240}?(R\$\s*[\d\.]+,\d{2})|(R\$\s*[\d\.]+,\d{2}).{0,240}?"
+            r"(https?://(?:www\.)?amazon\.com\.br[^\"'\s<>]*?/(?:dp|gp/product)/[A-Z0-9]{10})",
+            blob,
+            re.I | re.S,
+        ):
+            href = m.group(1) or m.group(4)
+            preco_txt = m.group(2) or m.group(3)
+            preco = _preco_para_numero(preco_txt)
+            asin = _asin_amazon(href or "")
+            titulo = termo
+            _guardar(_item_google(
+                termo, titulo, preco, href, f"https://m.media-amazon.com/images/P/{asin}._AC_SL500_.jpg" if asin else "",
+                "amazon", origem,
+            ))
+        for plat, padrao in (
+            ("mercado_livre", r"https?://(?:www\.|produto\.)?mercado(?:livre|libre)\.com\.br[^\"'\s<>]+"),
+            ("shopee", r"https?://(?:s\.)?shopee\.com\.br[^\"'\s<>]+"),
+        ):
+            for achado in re.finditer(padrao, blob, re.I):
+                href = achado.group(0).rstrip(").,;]")
+                janela = blob[max(0, achado.start() - 280): achado.end() + 280]
+                preco_m = re.search(r"R\$\s*[\d\.]+,\d{2}", janela)
+                if not preco_m:
+                    continue
+                _guardar(_item_google(
+                    termo, termo, _preco_para_numero(preco_m.group(0)), href, "", plat, origem,
+                ))
+
+    ofertas.sort(key=lambda p: p.get("preco_num") or 9e9)
+    return ofertas[:limite]
+
+
+def _chave_serper():
+    chaves = _chaves_env("SERPER_API_KEY", "SERPER_KEY")
+    return chaves[0] if chaves else ""
+
+
+def _serper_post(caminho, corpo):
+    chave = _chave_serper()
+    if not chave or requests is None:
+        return {}
+    try:
+        resp = requests.post(
+            f"https://google.serper.dev{caminho}",
+            headers={"X-API-KEY": chave, "Content-Type": "application/json"},
+            json=corpo,
+            timeout=18,
+        )
+        if resp.status_code >= 400:
+            print(f"[Serper] HTTP {resp.status_code}")
+            return {}
+        dados = resp.json() if resp.text else {}
+        return dados if isinstance(dados, dict) else {}
+    except Exception as e:
+        print(f"[Serper] {e}")
+        return {}
+
+
+def _preco_item_serper(it):
+    if not isinstance(it, dict):
+        return 0.0
+    for k in ("extracted_price", "extractedPrice"):
+        try:
+            n = float(it.get(k))
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            pass
+    return _preco_serper_para_float(it.get("price") or it.get("snippet") or "")
+
+
+def _href_item_serper(it):
+    if not isinstance(it, dict):
+        return ""
+    for k in ("link", "productLink", "merchantLink", "url"):
+        h = _desempacotar_link_google((it.get(k) or "").strip())
+        if h:
+            return h
+    return _primeira_url_loja(json.dumps(it, ensure_ascii=False))
+
+
+def _guardar_melhor_loja(ofertas, item):
+    if not item:
+        return ofertas
+    plat = item.get("plataforma")
+    atual = next((p for p in ofertas if p.get("plataforma") == plat), None)
+    if atual is None:
+        ofertas.append(item)
+        return ofertas
+    if item.get("preco_num", 9e9) < atual.get("preco_num", 9e9):
+        return [p for p in ofertas if p.get("plataforma") != plat] + [item]
+    return ofertas
+
+
+def _ofertas_de_itens_serper(termo, itens, limite=8):
+    ofertas = []
+    for it in itens or []:
+        if not isinstance(it, dict):
+            continue
+        if it.get("source") and not _source_loja_oficial(it.get("source")):
+            continue
+        titulo = (it.get("title") or it.get("name") or termo or "").strip()
+        blob = " ".join(str(it.get(k) or "") for k in ("source", "domain", "title", "snippet", "link"))
+        href = _href_item_serper(it)
+        plat = _plataforma_loja(href) or _loja_do_texto(blob)
+        preco = _preco_item_serper(it)
+        foto = (it.get("imageUrl") or it.get("image") or "").strip()
+        ofertas = _guardar_melhor_loja(
+            ofertas,
+            _item_google(termo, titulo, preco, href, foto, plat, origem="serper"),
+        )
+        if len(ofertas) >= limite:
+            break
+    ofertas.sort(key=lambda p: p.get("preco_num") or 9e9)
+    return ofertas[:limite]
+
+
+def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20):
+    """
+    Função principal: cache → POST Serper Shopping (BR) → só Amazon/ML/Shopee
+    → preço float → menor preço no topo.
+    """
+    t = (termo or "").strip()
+    if not t:
+        return []
+    if usar_cache:
+        cached = _ler_cache_garimpo(t)
+        if cached:
+            lista = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(cached))
+            if lista:
+                print(f"[Serper] cache {_chave_cache(t)}")
+                return lista
+    chave = _chave_serper()
+    if not chave or requests is None:
+        return []
+    try:
+        resp = requests.post(
+            "https://google.serper.dev/shopping",
+            headers={
+                "X-API-KEY": chave,
+                "Content-Type": "application/json",
+            },
+            json={"q": t, "gl": "br", "hl": "pt-br", "num": min(int(limite or 20), 40)},
+            timeout=18,
+        )
+        if resp.status_code >= 400:
+            print(f"[Serper] HTTP {resp.status_code}")
+            return []
+        dados = resp.json() if resp.text else {}
+    except Exception as e:
+        print(f"[Serper] {e}")
+        return []
+    if not isinstance(dados, dict):
+        return []
+    shopping = [
+        it for it in (dados.get("shopping") or [])
+        if isinstance(it, dict) and _source_loja_oficial(it.get("source") or "")
+    ]
+    ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite)
+    ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas))
+    if usar_cache and ofertas:
+        _gravar_cache_garimpo(t, ofertas)
+    print(f"[Serper] {len(ofertas)} ofertas filtradas (Amazon/ML/Shopee)")
+    return ofertas
+
+
+def _buscar_ofertas_serper(termo, limite=8):
+    """Shopping Serper + busca orgânica se faltar loja — sem gravar cache (o motor grava)."""
+    ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=False, limite=limite)
+    plats = {p.get("plataforma") for p in ofertas}
+    if len(plats) < 3 and _chave_serper():
+        dados2 = _serper_post("/search", {
+            "q": f"{(termo or '').strip()} site:amazon.com.br OR site:mercadolivre.com.br OR site:shopee.com.br",
+            "gl": "br",
+            "hl": "pt-br",
+            "num": 10,
+        })
+        for item in _ofertas_de_itens_serper(termo, dados2.get("organic") or [], limite):
+            ofertas = _guardar_melhor_loja(ofertas, item)
+        ofertas = _ordenar_entrega_menor_preco(ofertas)
+    if ofertas:
+        print(f"[Serper] {len(ofertas[:limite])} ofertas do Google")
+    return ofertas[:limite]
+
+
+def _buscar_ofertas_google_shopping(termo, limite=8):
+    """Serper no ar; scrape HTML só se a chave Serper não vier."""
+    serper = _buscar_ofertas_serper(termo, limite)
+    if serper:
+        return serper
+    if requests is None or BeautifulSoup is None or not (termo or "").strip():
+        return []
+    q = urllib.parse.quote(termo.strip())
+    urls = (
+        f"https://www.google.com/search?q={q}&tbm=shop&gbv=1&hl=pt-BR&gl=br&num=20&pws=0",
+        f"https://www.google.com/search?udm=28&gbv=1&hl=pt-BR&gl=br&num=20&pws=0&q={q}",
+        f"https://www.google.com/search?tbm=shop&hl=pt-BR&gl=br&num=20&pws=0&q={q}",
+        (
+            "https://www.google.com/search?gbv=1&hl=pt-BR&gl=br&num=10&pws=0&q="
+            f"{q}+(site:amazon.com.br+OR+site:mercadolivre.com.br+OR+site:shopee.com.br)"
+        ),
+    )
+    ofertas = []
+    origem_ok = ""
+    for i, url in enumerate(urls):
+        html, origem = _baixar_url_loja(
+            url, headers=HEADERS_GOOGLE, timeout=12, browser=True, avisar=(i == len(urls) - 1),
+        )
+        if not html:
+            continue
+        lote = _parsear_ofertas_google(html, termo, origem=origem, limite=limite)
+        if lote:
+            origem_ok = origem
+            plats = {p.get("plataforma") for p in ofertas}
+            for item in lote:
+                if item.get("plataforma") in plats:
+                    atual = next(p for p in ofertas if p.get("plataforma") == item.get("plataforma"))
+                    if item["preco_num"] < atual["preco_num"]:
+                        ofertas = [p for p in ofertas if p.get("plataforma") != item.get("plataforma")]
+                        ofertas.append(item)
+                    continue
+                ofertas.append(item)
+                plats.add(item.get("plataforma"))
+            if len(plats) >= 3:
+                break
+    ofertas.sort(key=lambda p: p.get("preco_num") or 9e9)
+    print(f"[Google] {len(ofertas)} ofertas do produto em {origem_ok or 'falha'}")
+    return ofertas[:limite]
 
 
 def _marcar_fonte_scrape(item, origem):
@@ -1810,7 +2034,15 @@ def _atualizar_preco_pdp_amazon(item, termo):
 
 
 def _atualizar_catalogo_amazon_vivo(lista, termo):
-    amazon = [p for p in lista or [] if p.get("plataforma") == "amazon" and _asin_amazon(p.get("url") or "")]
+    amazon = [
+        p for p in lista or []
+        if p.get("plataforma") == "amazon"
+        and _asin_amazon(p.get("url") or "")
+        and (
+            _anuncio_veio_do_google(p)
+            or _asin_amazon(p.get("url") or "") == ASIN_DUALSENSE
+        )
+    ]
     if not amazon:
         return
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -2107,8 +2339,16 @@ def _ofertas_fallback_lojas(termo):
             "vale_a_pena": True,
             "fonte": "busca_loja",
             "campeao": False,
+            "termo_busca": t,
         })
     return ofertas
+
+
+def _carimbar_lista_afiliado(lista):
+    """Garante afiliado JDS em todo link entregue ao usuário."""
+    for p in lista or []:
+        p["url"] = _link_compra_do_card(p)
+    return lista
 
 
 def gerar_lista_ofertas_reais(
@@ -2132,6 +2372,7 @@ def gerar_lista_ofertas_reais(
         if cached:
             lista = _ordenar_entrega_menor_preco(cached)
             if lista:
+                lista = _carimbar_lista_afiliado(lista)
                 print(f"[Motor] cache instantâneo: {lista[0]['preco']} em {lista[0].get('loja')}")
                 return lista
 
@@ -2148,6 +2389,7 @@ def gerar_lista_ofertas_reais(
         if not _oferta_foto_preco_do_mesmo_item(item):
             return
         item["loja"] = _nome_loja(plat)
+        item["termo_busca"] = termo
         urls_vistas.add(url)
         lista_produtos.append(item)
 
@@ -2163,6 +2405,23 @@ def gerar_lista_ofertas_reais(
             ))
 
     plats_ja = {p.get("plataforma") for p in lista_produtos}
+
+    if usar_vivo:
+        for item in _buscar_ofertas_google_shopping(termo):
+            antes = len(lista_produtos)
+            _adicionar(item)
+            if len(lista_produtos) > antes:
+                plats_ja.add(item.get("plataforma"))
+        if len(plats_ja) < 3:
+            for item in _coletar_ofertas_ao_vivo(termo):
+                plat = item.get("plataforma")
+                if plat in plats_ja:
+                    continue
+                antes = len(lista_produtos)
+                _adicionar(item)
+                if len(lista_produtos) > antes:
+                    plats_ja.add(plat)
+
     cats_ok = [c for c in CATALOGO_PRODUTOS_REAIS if _catalogo_compativel(termo, c)]
     if cats_ok:
         melhor = max(_score_catalogo(termo, c) for c in cats_ok)
@@ -2183,25 +2442,11 @@ def gerar_lista_ofertas_reais(
                 of["titulo"], of["preco"], of["url"], foto, plat,
                 full=of.get("full", False),
             )
+            item["fonte"] = "catalogo"
             if not _oferta_foto_preco_do_mesmo_item(item):
                 continue
             _adicionar(item)
             plats_ja.add(plat)
-
-    catalogo_ja = list(lista_produtos)
-
-    if usar_vivo:
-        if catalogo_ja:
-            _atualizar_catalogo_amazon_vivo(lista_produtos, termo)
-        else:
-            for item in _coletar_ofertas_ao_vivo(termo):
-                plat = item.get("plataforma")
-                if plat in plats_ja and item.get("fonte") not in {"oficial", "scrape"}:
-                    continue
-                antes = len(lista_produtos)
-                _adicionar(item)
-                if len(lista_produtos) > antes:
-                    plats_ja.add(plat)
 
     plats_ja = {p.get("plataforma") for p in lista_produtos}
     faltam = [p for p in ("mercado_livre", "amazon", "shopee") if p not in plats_ja]
@@ -2213,6 +2458,7 @@ def gerar_lista_ofertas_reais(
     if plataforma_chave:
         lista_produtos = [p for p in lista_produtos if p.get("plataforma") == plataforma_chave]
     lista_produtos = _ordenar_entrega_menor_preco(lista_produtos)
+    lista_produtos = _carimbar_lista_afiliado(lista_produtos)
     if lista_produtos and usar_cache:
         _gravar_cache_garimpo(termo, lista_produtos)
     if lista_produtos and usar_vivo:
@@ -2224,18 +2470,29 @@ def gerar_lista_ofertas_reais(
 
 
 def buscar_ofertas_jds(termo):
-    """Usa a API no ar (Render) se JDS_API_URL existir; senão busca local."""
+    """Usa a API no ar (Railway) se JDS_API_URL existir; senão busca local."""
     termo = (termo or "").strip()
     if not termo:
         return []
     if JDS_API_URL and requests is not None:
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        token = (os.environ.get("JDS_API_TOKEN") or "").strip()
+        if token:
+            headers["X-JDS-TOKEN"] = token
         try:
-            resp = requests.get(
+            resp = requests.post(
                 f"{JDS_API_URL}/garimpar",
-                params={"q": termo},
+                json={"q": termo},
                 timeout=90,
-                headers={"Accept": "application/json"},
+                headers=headers,
             )
+            if resp.status_code == 405:
+                resp = requests.get(
+                    f"{JDS_API_URL}/garimpar",
+                    params={"q": termo},
+                    timeout=90,
+                    headers=headers,
+                )
             if resp.status_code < 400:
                 dados = resp.json() or {}
                 ofertas = dados.get("ofertas") or dados.get("produtos") or []
@@ -2244,6 +2501,67 @@ def buscar_ofertas_jds(termo):
         except Exception as e:
             print(f"[API JDS] {e} — usando motor local")
     return gerar_lista_ofertas_reais(termo)
+
+
+def _limpar_texto_voz(texto):
+    t = re.sub(r"\s+", " ", (texto or "").strip())
+    t = t.strip(" .,!?;:\"'")
+    return t[:120]
+
+
+def _ouvir_windows_sapi():
+    """Ditados do Windows: qualquer produto em pt-BR, sem lista fixa."""
+    ps = (
+        "Add-Type -AssemblyName System.Speech; "
+        "$ErrorActionPreference='Stop'; "
+        "try { $c=[Globalization.CultureInfo]::GetCultureInfo('pt-BR'); "
+        "$eng=New-Object System.Speech.Recognition.SpeechRecognitionEngine $c } "
+        "catch { $eng=New-Object System.Speech.Recognition.SpeechRecognitionEngine }; "
+        "$eng.SetInputToDefaultAudioDevice(); "
+        "$eng.LoadGrammar((New-Object System.Speech.Recognition.DictationGrammar)); "
+        "$eng.InitialSilenceTimeout=New-TimeSpan -Seconds 5; "
+        "$eng.EndSilenceTimeout=New-TimeSpan -Seconds 1; "
+        "$r=$eng.Recognize((New-TimeSpan -Seconds 10)); "
+        "if ($r -and $r.Text) { [Console]::Out.Write($r.Text) }"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", ps],
+            capture_output=True,
+            timeout=22,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception:
+        return ""
+    return _limpar_texto_voz(proc.stdout or "")
+
+
+def _ouvir_google_ptbr():
+    """Qualquer fala → texto (pt-BR). Só se SpeechRecognition estiver instalado."""
+    try:
+        import speech_recognition as sr
+    except ImportError:
+        return ""
+    rec = sr.Recognizer()
+    rec.pause_threshold = 0.85
+    try:
+        with sr.Microphone() as source:
+            rec.adjust_for_ambient_noise(source, duration=0.35)
+            audio = rec.listen(source, timeout=6, phrase_time_limit=8)
+        return _limpar_texto_voz(rec.recognize_google(audio, language="pt-BR"))
+    except Exception:
+        return ""
+
+
+def ouvir_produto_microfone():
+    """Transcreve o produto falado. Nunca força um item fixo."""
+    if sys.platform == "win32":
+        termo = _ouvir_windows_sapi()
+        if termo:
+            return termo
+    return _ouvir_google_ptbr()
 
 
 def _ofertas_super_descontos():
@@ -2424,8 +2742,6 @@ def main(page):
         )
 
     def montar_card(produto, extra_selo=None):
-        url_oferta = _link_compra_do_card(produto)
-
         # 3. MARCA DA LOJA NOS CARDS: Etiqueta da plataforma (Mercado Livre, Amazon ou Shopee)
         plat = produto.get("plataforma", "")
         selos = []
@@ -2449,17 +2765,18 @@ def main(page):
         async def copiar_titulo(e):
             await copiar_texto(produto["titulo"], "Título copiado")
 
-        async def ver_oferta(e):
+        async def ver_oferta(e, prod=produto):
             fechar_todos_dialogos()
             try:
                 await page.clipboard.set(CUPOM_JDS)
             except Exception:
                 pass
             snack("Cupom JDS10 copiado. Cole no carrinho da loja.", "#00F5D4")
+            url_abrir = _link_compra_do_card(prod)
             try:
-                await page.launch_url(url_oferta)
+                await page.launch_url(url_abrir)
             except TypeError:
-                page.launch_url(url_oferta)
+                page.launch_url(url_abrir)
             await txt_busca.focus()
             page.update()
 
@@ -2762,9 +3079,20 @@ def main(page):
     txt_busca.on_submit = garimpar
 
     async def busca_voz(e):
-        snack("Ouvindo... busca por voz JDS", "#9D4EDD")
-        await asyncio.sleep(0.4)
-        txt_busca.value = "fone bluetooth"
+        snack("Fale o produto... (qualquer um)", "#9D4EDD")
+        rodinha.visible = True
+        page.update()
+        try:
+            termo = await asyncio.to_thread(ouvir_produto_microfone)
+        except Exception:
+            termo = ""
+        finally:
+            rodinha.visible = False
+            page.update()
+        if not termo:
+            snack("Não entendi. Fale de novo ou digite o produto.", "#FFB703")
+            return
+        txt_busca.value = termo
         page.update()
         await garimpar()
 
@@ -2852,7 +3180,7 @@ def main(page):
                     ft.IconButton(
                         icon=ft.Icons.MIC,
                         icon_color="#9D4EDD",
-                        tooltip="Busca por voz",
+                        tooltip="Falar qualquer produto",
                         on_click=busca_voz,
                     ),
                     ft.Button("Garimpar", bgcolor="#9D4EDD",
@@ -2987,10 +3315,93 @@ def executar_testes_unitarios():
     )
     if antigo_meli:
         os.environ["MELI_ACCESS_TOKEN"] = antigo_meli
-    checar(gerar_lista_ofertas_reais("") == [], "busca vazia não inventa produto")
+    checar(_limpar_texto_voz("  DualSense PS5!! ") == "DualSense PS5", "voz limpa o termo falado")
+    checar(_limpar_texto_voz("cabo usb tipo c") == "cabo usb tipo c", "voz aceita qualquer produto")
+    checar("fone bluetooth" not in (_limpar_texto_voz("redmi note 13") or ""), "voz não força fone bluetooth")
     fb = _ofertas_fallback_lojas("iphone 16")
     checar(len(fb) == 3 and all(p.get("url", "").startswith("http") for p in fb), "fallback sempre tem 3 lojas")
-    checar(abs(_preco_para_numero("R$ 1.234,56") - 1234.56) < 0.01, "parser de preço BR")
+    checar(
+        "B0CQKLS4RP" in _desempacotar_link_google(
+            "/url?q=https://www.amazon.com.br/dp/B0CQKLS4RP%3Ftag%3Dx&sa=U"
+        ),
+        "Google devolve o /dp/ da loja, não o redirect",
+    )
+    checar(
+        "MLB32344506" in _desempacotar_link_google(
+            "https://www.google.com/url?url=https://www.mercadolivre.com.br/x/p/MLB32344506"
+        ),
+        "Google unpack lê o parâmetro url= do Mercado Livre",
+    )
+    html_g = """
+    <div>
+      <a href="/url?q=https://www.amazon.com.br/dp/B0CQKLS4RP">
+        <h3>PlayStation DualSense Controle sem fio PS5</h3>
+      </a>
+      <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:dual"/>
+      R$ 404,27 Amazon.com.br
+    </div>
+    <div>
+      <a href="https://www.google.com/url?url=https://www.mercadolivre.com.br/dualsense-ps5/p/MLB32344506">
+        <h3>Controle DualSense PS5 Sony</h3>
+      </a>
+      <img src="https://http2.mlstatic.com/D_NQ_NP_teste-O.jpg"/>
+      R$ 419,00 Mercado Livre
+    </div>
+    """
+    g_ofertas = _parsear_ofertas_google(html_g, "dualsense ps5", origem="direto")
+    plats_g = {p.get("plataforma") for p in g_ofertas}
+    checar("amazon" in plats_g and "mercado_livre" in plats_g, "parser Google lê Amazon e Mercado Livre")
+    amz_g = next(p for p in g_ofertas if p["plataforma"] == "amazon")
+    ml_g = next(p for p in g_ofertas if p["plataforma"] == "mercado_livre")
+    checar("/dp/B0CQKLS4RP" in (amz_g.get("url") or ""), "Google Amazon vai para /dp/ real")
+    checar("OrderId_PRICE" in _link_compra_do_card(ml_g) and f"identity={ID_MERCADO_LIVRE}" in _link_compra_do_card(ml_g),
+           "Ver Oferta ML abre a lista do produto pelo menor preço")
+    serper_itens = [
+        {
+            "title": "PlayStation DualSense Controle sem fio PS5",
+            "source": "Amazon.com.br",
+            "price": "R$ 404,27",
+            "extracted_price": 404.27,
+            "link": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+            "imageUrl": "https://m.media-amazon.com/images/I/dual.jpg",
+        },
+        {
+            "title": "Controle DualSense PS5 Sony",
+            "source": "Mercado Livre",
+            "price": "R$ 419,00",
+            "link": "https://www.mercadolivre.com.br/dualsense-ps5/p/MLB32344506",
+            "imageUrl": "https://http2.mlstatic.com/D_NQ_NP_teste-O.jpg",
+        },
+    ]
+    serper_of = _ofertas_de_itens_serper("dualsense ps5", serper_itens)
+    checar(
+        {p.get("plataforma") for p in serper_of} >= {"amazon", "mercado_livre"},
+        "Serper devolve Amazon e Mercado Livre do Google",
+    )
+    checar(
+        any("/dp/B0CQKLS4RP" in (p.get("url") or "") for p in serper_of),
+        "Serper Amazon usa o /dp/ do Google",
+    )
+    checar(_source_loja_oficial("Amazon.com.br") and _source_loja_oficial("MERCADO LIVRE"),
+           "filtro source aceita Amazon e Mercado Livre")
+    checar(_source_loja_oficial("Shopee") and not _source_loja_oficial("Magazine Luiza"),
+           "filtro source recusa loja fora das 3 oficiais")
+    checar(abs(_preco_serper_para_float("R$ 1.799,00") - 1799.0) < 0.01,
+           "preço Serper R$ 1.799,00 vira 1799.00")
+    magalu = _ofertas_de_itens_serper("tv", [{
+        "title": "Smart TV 50",
+        "source": "Magazine Luiza",
+        "price": "R$ 1.500,00",
+        "link": "https://www.magazineluiza.com.br/tv",
+        "imageUrl": "https://m.media-amazon.com/images/I/x.jpg",
+    }])
+    checar(not magalu, "source Magazine Luiza não entra no ranking")
+    tv = gerar_lista_ofertas_reais("smart tv 50", usar_cache=False, usar_vivo=False)
+    ml_tv = next(p for p in tv if p.get("plataforma") == "mercado_livre")
+    amz_tv = next(p for p in tv if p.get("plataforma") == "amazon")
+    checar("OrderId_PRICE" in _link_compra_do_card(ml_tv), "catálogo ML abre busca, não /p/ inexistente")
+    checar("/s?" in _link_compra_do_card(amz_tv) and "price-asc-rank" in _link_compra_do_card(amz_tv),
+           "catálogo Amazon sem DualSense abre busca, não /dp/ 404")
     checar(abs(_preco_de_html_amazon(
         '<span class="a-price"><span class="a-offscreen">R$ 404,27</span></span>'
         '<span class="a-price a-text-price"><span class="a-offscreen">R$ 499,90</span></span>'
@@ -3068,6 +3479,22 @@ def executar_testes_unitarios():
     link_amz = _link_compra_do_card(amz)
     checar("/dp/B0CQKLS4RP" in link_amz, "Ver Oferta Amazon abre /dp/ do produto")
     checar(f"tag={ID_AMAZON}" in link_amz, "Amazon carimba tag jdseconomiz0e-20")
+    sujo = _aplicar_afiliado_google(
+        "https://www.amazon.com.br/dp/B0CQKLS4RP?tag=outra-20", "amazon"
+    )
+    checar(f"tag={ID_AMAZON}" in sujo and "outra-20" not in sujo, "Amazon troca tag de terceiro pela JDS")
+    checar(
+        f"identity={ID_MERCADO_LIVRE}" in _aplicar_afiliado_google(
+            "https://www.mercadolivre.com.br/x/p/MLB1", "mercado_livre"
+        ),
+        "ML sempre leva identity mape592520",
+    )
+    checar(
+        f"sub_id={ID_SHOPEE}" in _aplicar_afiliado_google(
+            "https://shopee.com.br/search?keyword=dualsense", "shopee"
+        ),
+        "Shopee sempre leva sub_id 18381751263",
+    )
     checar("B0CQKLS4RP" in (amz.get("foto") or "") and "unsplash" not in (amz.get("foto") or ""), "foto Amazon é do DualSense (ASIN)")
     checar(_oferta_foto_preco_do_mesmo_item(amz), "foto e preço do mesmo item Amazon")
 
@@ -3079,7 +3506,7 @@ def executar_testes_unitarios():
         "mercado_livre",
     )
     link_ml = _link_compra_do_card(ml)
-    checar("produto.mercadolivre" in link_ml and "MLB" in link_ml.upper(), "Ver Oferta ML abre anúncio")
+    checar("OrderId_PRICE" in link_ml, "Ver Oferta ML abre a lista pelo menor preço")
     checar(f"identity={ID_MERCADO_LIVRE}" in link_ml, "ML carimba identity mape592520")
 
     shp = _montar_item_oferta(
@@ -3091,6 +3518,14 @@ def executar_testes_unitarios():
     )
     link_shp = _link_compra_do_card(shp)
     checar("shopee.com.br/search" in link_shp and "keyword=" in link_shp, "Shopee abre busca pública (sem login)")
+    checar("sortBy=sales" in link_shp and "sortBy=price" not in link_shp, "Shopee busca pelos mais vendidos, não pelo acessório mais barato")
+    fb_link = _ofertas_fallback_lojas("cabo usb tipo c")
+    amz_fb = next(p for p in fb_link if p["plataforma"] == "amazon")
+    ml_fb = next(p for p in fb_link if p["plataforma"] == "mercado_livre")
+    shp_fb = next(p for p in fb_link if p["plataforma"] == "shopee")
+    checar("price-asc-rank" in _link_compra_do_card(amz_fb), "Ver Oferta Amazon (sem preço) ordena pelo menor")
+    checar("OrderId_PRICE" in _link_compra_do_card(ml_fb), "Ver Oferta ML (sem preço) ordena pelo menor")
+    checar("sortBy=sales" in _link_compra_do_card(shp_fb), "Ver Oferta Shopee abre os mais vendidos do produto")
     checar(f"sub_id={ID_SHOPEE}" in link_shp, "Shopee carimba sub_id 18381751263")
 
     misturado = _ordenar_entrega_menor_preco([
