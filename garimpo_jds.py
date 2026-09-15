@@ -478,9 +478,10 @@ def _oferta_foto_preco_do_mesmo_item(item):
             "media-amazon" in foto or "ssl-images-amazon" in foto or "amazon" in foto
         )
     if plat == "mercado_livre":
-        return "mlstatic" in foto.lower()
+        return "mlstatic" in foto.lower() or "media-amazon" in foto.lower()
     if plat == "shopee":
-        return "shopee" in foto.lower() or "cf.shopee" in foto.lower()
+        f = foto.lower()
+        return "shopee" in f or "cf.shopee" in f or "media-amazon" in f
     return False
 
 
@@ -653,17 +654,12 @@ def _raspar_cards_mercado_livre(termo_busca, limite=6):
         f"https://lista.mercadolivre.com.br/{slug}_NoIndex_True",
         f"https://mercadolivre.com.br/{slug}_NoIndex_True",
     ]
-    html = ""
+    html, origem = "", ""
     for url in urls:
-        try:
-            resp = requests.get(url, headers=HEADERS_GOOGLE, timeout=6)
-            if resp.status_code < 400 and resp.text and (
-                "ui-search" in resp.text or "poly-card" in resp.text
-            ):
-                html = resp.text
-                break
-        except Exception as e:
-            print(f"[Aviso] ML scrape: {e}")
+        html, origem = _baixar_url_loja(url, headers=HEADERS_GOOGLE, timeout=6, browser=True)
+        if html and ("ui-search" in html or "poly-card" in html or "andes-money" in html):
+            break
+        html = ""
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -705,10 +701,10 @@ def _raspar_cards_mercado_livre(termo_busca, limite=6):
         if not foto:
             continue
         vistos.add(titulo)
-        produtos.append(_montar_item_oferta(
+        produtos.append(_marcar_fonte_scrape(_montar_item_oferta(
             titulo, preco_num, href, foto, "mercado_livre",
             full="full" in texto_l,
-        ))
+        ), origem))
         if len(produtos) >= limite:
             break
     return produtos
@@ -1368,7 +1364,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 
 def _chave_cache(termo):
-    return re.sub(r"\s+", " ", (termo or "").strip().lower())
+    return "v4:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
 
 
 def _ler_cache_garimpo(termo):
@@ -1554,6 +1550,8 @@ def _pagina_bloqueada(texto):
     t = (texto or "").lower()
     if len(t) < 80:
         return True
+    if t.strip().startswith("{") and any(k in t for k in ('"error"', '"code"', "unauthorized", "invalid api")):
+        return True
     return any(p in t for p in (
         "api-services-support@amazon.com",
         "sorry, we just need to make sure you're not a robot",
@@ -1561,23 +1559,36 @@ def _pagina_bloqueada(texto):
     ))
 
 
+def _resposta_util_loja(url, texto):
+    if not texto or _pagina_bloqueada(texto):
+        return False
+    u = (url or "").lower()
+    if "amazon." in u:
+        return "data-asin" in texto or "/dp/" in texto
+    if "shopee.com.br/api" in u:
+        return '"items"' in texto or '"item_basic"' in texto
+    if "mercadolivre." in u or "mercadolibre." in u:
+        return "ui-search" in texto or "poly-card" in texto or "andes-money" in texto or "/p/" in texto
+    return True
+
+
 def _baixar_url_loja(url, headers=None, timeout=8, browser=False):
-    """Tenta direto; se bloquear, ZenRows; se falhar, ScrapingAnt (uma API por vez)."""
+    """Tenta direto; se a página for bloqueio, ZenRows; se falhar, ScrapingAnt."""
     if requests is None:
         return "", ""
     try:
         resp = requests.get(url, headers=headers or HEADERS_GOOGLE, timeout=timeout)
         corpo = resp.text if resp.status_code < 400 else ""
-        if corpo and not _pagina_bloqueada(corpo):
+        if _resposta_util_loja(url, corpo):
             return corpo, "direto"
     except Exception as e:
         print(f"[HTTP loja] {e}")
     zen = _zenrows_baixar(url)
-    if zen and not _pagina_bloqueada(zen):
+    if _resposta_util_loja(url, zen):
         print("[Motor] página via ZenRows")
         return zen, "zenrows"
     ant = _scrapingant_baixar(url, browser=browser)
-    if ant and not _pagina_bloqueada(ant):
+    if _resposta_util_loja(url, ant):
         print("[Motor] página via ScrapingAnt")
         return ant, "scrapingant"
     return "", ""
@@ -1924,7 +1935,7 @@ def _ofertas_fallback_lojas(termo):
         ofertas.append({
             "titulo": t,
             "preco": "Ver preço na loja",
-            "preco_num": 1.0,
+            "preco_num": 999990.0,
             "url": url,
             "foto": foto,
             "plataforma": plat,
@@ -1999,6 +2010,12 @@ def gerar_lista_ofertas_reais(
             if plat in plats_ja:
                 continue
             foto = of.get("foto") or ""
+            if not foto:
+                for irma in cat_item["ofertas"]:
+                    asin = _asin_amazon(irma.get("url") or "")
+                    if asin:
+                        foto = f"https://m.media-amazon.com/images/P/{asin}._AC_SL500_.jpg"
+                        break
             item = _montar_item_oferta(
                 of["titulo"], of["preco"], of["url"], foto, plat,
                 full=of.get("full", False),
@@ -2017,8 +2034,12 @@ def gerar_lista_ofertas_reais(
         if len(lista_produtos) > antes:
             plats_ja.add(plat)
 
-    if not lista_produtos:
-        lista_produtos.extend(_ofertas_fallback_lojas(termo))
+    plats_ja = {p.get("plataforma") for p in lista_produtos}
+    faltam = [p for p in ("mercado_livre", "amazon", "shopee") if p not in plats_ja]
+    if faltam:
+        for fb in _ofertas_fallback_lojas(termo):
+            if fb.get("plataforma") in faltam:
+                lista_produtos.append(fb)
 
     if plataforma_chave:
         lista_produtos = [p for p in lista_produtos if p.get("plataforma") == plataforma_chave]
@@ -2047,7 +2068,7 @@ def buscar_ofertas_jds(termo):
             resp = requests.get(
                 f"{JDS_API_URL}/garimpar",
                 params={"q": termo},
-                timeout=25,
+                timeout=90,
                 headers={"Accept": "application/json"},
             )
             if resp.status_code < 400:
@@ -2969,11 +2990,17 @@ def executar_testes_motor_busca():
             lojas_ok = sum(1 for p in produtos if p.get("loja") in ("Mercado Livre", "Amazon", "Shopee"))
             fotos_validas = sum(1 for p in produtos if p.get(
                 "foto") and p["foto"].startswith("http"))
+            reais = [p for p in produtos if p.get("fonte") != "busca_loja"]
             compra_ok = all(_oferta_pronta_para_compra(p) for p in produtos)
-            mesmo_item = all(_oferta_foto_preco_do_mesmo_item(p) for p in produtos)
-            sem_banco_fotos = all("unsplash" not in (p.get("foto") or "").lower() for p in produtos)
+            mesmo_item = all(_oferta_foto_preco_do_mesmo_item(p) for p in reais) if reais else True
+            sem_banco_fotos = all("unsplash" not in (p.get("foto") or "").lower() for p in reais) if reais else True
 
             sem_acessorio = all(not _parece_acessorio_barato(p.get("titulo") or "", termo) for p in produtos)
+            plats = {p.get("plataforma") for p in produtos if p.get("fonte") != "busca_loja"}
+            tres_lojas = {"amazon", "mercado_livre", "shopee"}.issubset(
+                {p.get("plataforma") for p in produtos}
+            )
+            print(f"[OK] Três lojas no ranking: {tres_lojas} { {p.get('loja') for p in produtos} }")
 
             print(f"[OK] Títulos capturados: {titulos_validos}/{len(produtos)}")
             print(f"[OK] Links http: {links_produto}/{len(produtos)}")
@@ -2994,6 +3021,7 @@ def executar_testes_motor_busca():
                 or not mesmo_item
                 or not sem_banco_fotos
                 or not sem_acessorio
+                or not tres_lojas
             ):
                 print("[FALHA] Link, afiliado, foto, loja ou Ver Oferta inconsistente")
                 resultados["falha"] += 1

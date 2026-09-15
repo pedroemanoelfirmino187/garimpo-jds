@@ -1,0 +1,15 @@
+[project]
+name = "jds-economiza"
+version = "1.0.0"
+description = "JDS Economiza — menor preço Amazon, Mercado Livre e Shopee"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.flet]
+org = "br.jds.economiza"
+product = "JDS Economiza"
+company = "JDS Economiza"
+copyright = "JDS Economiza"
+
+[tool.flet.app]
+path = "."
