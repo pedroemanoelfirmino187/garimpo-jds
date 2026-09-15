@@ -2726,9 +2726,10 @@ def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, l
     )
 
 
-def buscar_ofertas_jds(termo):
+def buscar_ofertas_jds(termo, pais="BR"):
     """Usa a API no ar (Railway) se JDS_API_URL existir; senão busca local."""
     termo = (termo or "").strip()
+    pais = _normalizar_pais(pais)
     if not termo:
         return []
     if JDS_API_URL and requests is not None:
@@ -2739,14 +2740,14 @@ def buscar_ofertas_jds(termo):
         try:
             resp = requests.post(
                 f"{JDS_API_URL}/garimpar",
-                json={"q": termo},
+                json={"q": termo, "pais": pais},
                 timeout=90,
                 headers=headers,
             )
             if resp.status_code == 405:
                 resp = requests.get(
                     f"{JDS_API_URL}/garimpar",
-                    params={"q": termo},
+                    params={"q": termo, "pais": pais},
                     timeout=90,
                     headers=headers,
                 )
@@ -2757,7 +2758,7 @@ def buscar_ofertas_jds(termo):
                     return _ordenar_entrega_menor_preco(ofertas)
         except Exception as e:
             print(f"[API JDS] {e} — usando motor local")
-    return gerar_lista_ofertas_reais(termo)
+    return gerar_lista_ofertas_reais(termo, pais=pais)
 
 
 def _limpar_texto_voz(texto):
@@ -2957,6 +2958,42 @@ def main(page):
         height=52,
     )
     txt_busca = campo_busca
+    mercado = {"pais": "BR"}
+
+    def _estilo_mercado(ativo):
+        return "#9D4EDD" if ativo else "#2A2A30"
+
+    def _pintar_mercado():
+        btn_br.bgcolor = _estilo_mercado(mercado["pais"] == "BR")
+        btn_us.bgcolor = _estilo_mercado(mercado["pais"] == "US")
+        campo_busca.hint_text = (
+            "Search US product (Amazon + eBay)..."
+            if mercado["pais"] == "US"
+            else "Garimpar produto..."
+        )
+
+    def escolher_mercado(pais):
+        def _on(e=None):
+            mercado["pais"] = _normalizar_pais(pais)
+            _pintar_mercado()
+            page.update()
+        return _on
+
+    btn_br = ft.Button(
+        "Brasil", bgcolor="#9D4EDD", color="white", on_click=escolher_mercado("BR"),
+    )
+    btn_us = ft.Button(
+        "EUA", bgcolor="#2A2A30", color="white", on_click=escolher_mercado("US"),
+    )
+    linha_mercado = ft.Row(
+        [
+            ft.Text("Mercado:", color="#AAAAAA", size=12),
+            btn_br,
+            btn_us,
+        ],
+        spacing=8,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
     rodinha = ft.Row(
         [ft.ProgressRing(color="#9D4EDD", width=22, height=22)],
         alignment=ft.MainAxisAlignment.CENTER,
@@ -3008,6 +3045,8 @@ def main(page):
             selos.append(chip("🟠 Amazon", "#FF9900"))
         elif plat == "shopee":
             selos.append(chip("🔴 Shopee", "#EE4D2D"))
+        elif plat == "ebay":
+            selos.append(chip("🔵 eBay", "#0064D2"))
 
         selos.append(chip(produto.get("selo") or "NOVO", "#00F5D4"))
         if extra_selo:
@@ -3230,7 +3269,7 @@ def main(page):
             return False
         item["preco_anterior"] = item.get("preco")
         item["preco_num"] = novo
-        item["preco"] = _formatar_preco(novo)
+        item["preco"] = _formatar_preco(novo, pais=item.get("pais") or "BR")
         item["url"] = candidato.get("url") or item.get("url")
         item["queda"] = True
         return True
@@ -3248,7 +3287,9 @@ def main(page):
             if not termo:
                 continue
             try:
-                ofertas = await asyncio.to_thread(buscar_ofertas_jds, termo)
+                ofertas = await asyncio.to_thread(
+                    buscar_ofertas_jds, termo, item.get("pais") or "BR",
+                )
             except Exception as e:
                 print(f"[Desejos] {e}")
                 continue
@@ -3293,7 +3334,7 @@ def main(page):
         rodinha.visible = True
         page.update()
         try:
-            produtos = await asyncio.to_thread(buscar_ofertas_jds, termo)
+            produtos = await asyncio.to_thread(buscar_ofertas_jds, termo, mercado["pais"])
             produtos = _ordenar_entrega_menor_preco(produtos)
             preencher_grade(grade_garimpo, produtos)
             if not produtos:
@@ -3359,7 +3400,10 @@ def main(page):
             snack("Cole um link válido")
             return
         plat = _detectar_plataforma(bruto)
-        oculto = gerar_link_afiliado(bruto, plat)
+        if _host_amazon_eua(bruto):
+            oculto = aplicar_tag_amazon_eua(bruto)
+        else:
+            oculto = gerar_link_afiliado(bruto, plat)
         achados_convertidos.append(
             {"origem": bruto, "url": oculto, "plataforma": plat})
         txt_achado.value = ""
@@ -3431,6 +3475,7 @@ def main(page):
 
     aba_garimpar = ft.Column(
         [
+            linha_mercado,
             ft.Row(
                 [
                     txt_busca,
@@ -3818,6 +3863,8 @@ def executar_testes_unitarios():
         "https://www.amazon.com.br/dp/B0CQKLS4RP?tag=outra-20", "amazon"
     )
     checar(f"tag={ID_AMAZON}" in sujo and "outra-20" not in sujo, "Amazon troca tag de terceiro pela JDS")
+    import inspect as _insp
+    checar("pais" in _insp.signature(buscar_ofertas_jds).parameters, "app envia pais BR/US para a API")
     checar(
         f"identity={ID_MERCADO_LIVRE}" in _aplicar_afiliado_google(
             "https://www.mercadolivre.com.br/x/p/MLB1", "mercado_livre"
