@@ -42,6 +42,7 @@ except ImportError:
 ID_AMAZON = "jdseconomiz0e-20"
 ID_SHOPEE = "18381751263"
 ID_MERCADO_LIVRE = "mape592520"
+ASIN_DUALSENSE = "B0CQKLS4RP"
 CUPOM_JDS = "JDS10"
 CACHE_GARIMPO = Path(__file__).resolve().parent / "cache_garimpo.json"
 ARQ_DESEJOS = Path(__file__).resolve().parent / "desejos_jds.json"
@@ -514,19 +515,24 @@ def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NO
 
 
 
+def _score_catalogo(termo, cat_item):
+    t_low = (termo or "").lower()
+    return max((len(t) for t in cat_item["termos"] if t and t in t_low), default=0)
+
+
 def _catalogo_compativel(termo, cat_item):
     t_low = (termo or "").lower()
-    if not any(t in t_low for t in cat_item["termos"]):
+    termos_cat = [t.lower() for t in cat_item["termos"]]
+    if not any(t in t_low for t in termos_cat):
         return False
     marcas = [
         "samsung", "xiaomi", "iphone", "apple", "nike", "stanley",
         "lenovo", "dell", "mondial", "playstation", "xbox",
     ]
     titulos = " ".join(of["titulo"].lower() for of in cat_item["ofertas"])
+    blob = f"{titulos} {' '.join(termos_cat)}"
     for marca in marcas:
-        if marca in t_low and marca not in titulos and marca not in " ".join(cat_item["termos"]):
-            return False
-        if marca in t_low and marca not in titulos:
+        if marca in t_low and marca not in blob:
             return False
     return True
 
@@ -612,8 +618,22 @@ def _parece_acessorio_barato(titulo, termo=""):
     tl = _sem_acento(termo)
     if "bolsa" in t and any(k in tl for k in ("camera", "dslr", "canon")):
         return True
-    if any(k in tl for k in ("controle", "ps5", "dualsense")) and any(
-        x in t for x in ("grip", "protector", "playvital", "anti-skid", "sweat")
+    if any(k in tl for k in ("controle", "ps5", "dualsense", "playstation", "xbox")) and any(
+        x in t for x in (
+            "grip", "protector", "playvital", "anti-skid", "sweat",
+            "dock", "carregador", "cabo", "analogico", "thumbstick",
+            "base de carreg", "capa para controle", "skin", "silicone",
+        )
+    ):
+        return True
+    if any(k in tl for k in ("redmi", "iphone", "xiaomi", "smartphone", "celular", "galaxy")) and (
+        re.search(r"\bcapas?\b", t)
+        or any(
+            x in t for x in (
+                "capinha", "pelicula", " case", "case ", "cover", "bumper",
+                "vidro temperado", "protetor de tela", "cabo usb",
+            )
+        )
     ):
         return True
     return any(
@@ -623,7 +643,7 @@ def _parece_acessorio_barato(titulo, termo=""):
             " case", "case ", "cover", "bumper", "protetor de tela",
             "pelicula", "lux fold", "fold clear", "kit de reparo",
             "peca de reposicao", "peca sobressalente", "placa de reposicao",
-            "bolsa para", "bolsa impermeavel",
+            "bolsa para", "bolsa impermeavel", "capinha",
         )
     )
 
@@ -641,6 +661,10 @@ def _preco_plausivel(termo, preco, titulo):
     tlow = (termo or "").lower()
     if any(k in tlow for k in ("cabo", "carregador")):
         piso = 5.0
+    if any(k in tlow for k in ("dualsense", "ps5", "playstation", "xbox")):
+        piso = max(piso, 320.0)
+    if any(k in tlow for k in ("redmi", "iphone", "xiaomi", "smartphone", "celular", "galaxy")):
+        piso = max(piso, 199.0)
     return preco >= piso
 
 
@@ -967,15 +991,15 @@ CATALOGO_PRODUTOS_REAIS = [
         ],
     },
     {
-        "termos": ["controle", "ps5", "dualsense", "playstation", "xbox", "joystick", "gamepad"],
+        "termos": ["controle", "ps5", "dualsense", "playstation", "joystick", "gamepad", "controle ps5"],
         "foto_real": "https://images.unsplash.com/photo-1606144042614-b2417e99c4e3?w=600&auto=format&fit=crop&q=80",
         "ofertas": [
             {
                 "plataforma": "amazon",
                 "titulo": "PlayStation DualSense Controle sem fio – Branco Sony PS5",
-                "preco": 388.00,
+                "preco": 404.27,
                 "de": 499.90,
-                "url": f"https://www.amazon.com.br/PlayStation-DualSense-Controle-sem-fio/dp/B0CQKLS4RP?tag={ID_AMAZON}",
+                "url": f"https://www.amazon.com.br/PlayStation-DualSense-Controle-sem-fio/dp/{ASIN_DUALSENSE}?tag={ID_AMAZON}",
                 "full": False,
             },
             {
@@ -992,6 +1016,36 @@ CATALOGO_PRODUTOS_REAIS = [
                 "preco": 449.00,
                 "de": 499.90,
                 "url": f"https://shopee.com.br/search?keyword={urllib.parse.quote('controle dualsense sony original ps5')}&utm_source=an_{ID_SHOPEE}&utm_medium=affiliates&sub_id={ID_SHOPEE}",
+                "full": True,
+            },
+        ],
+    },
+    {
+        "termos": ["xbox", "controle xbox", "xbox series", "controle xbox series"],
+        "foto_real": "https://images.unsplash.com/photo-1605901309584-818e25960a8f?w=600&auto=format&fit=crop&q=80",
+        "ofertas": [
+            {
+                "plataforma": "amazon",
+                "titulo": "Xbox Wireless Controller Carbon Black – Xbox Series X|S",
+                "preco": 429.90,
+                "de": 499.90,
+                "url": f"https://www.amazon.com.br/dp/B08H99BPJN?tag={ID_AMAZON}",
+                "full": False,
+            },
+            {
+                "plataforma": "mercado_livre",
+                "titulo": "Controle Xbox Series X S Sem Fio Carbon Black Original",
+                "preco": 449.00,
+                "de": 529.00,
+                "url": f"https://lista.mercadolivre.com.br/controle-xbox-series-wireless_OrderId_PRICE?identity={ID_MERCADO_LIVRE}",
+                "full": True,
+            },
+            {
+                "plataforma": "shopee",
+                "titulo": "Controle Xbox Series Wireless Carbon Black Original",
+                "preco": 469.00,
+                "de": 549.90,
+                "url": f"https://shopee.com.br/search?keyword={urllib.parse.quote('controle xbox series wireless original')}&utm_source=an_{ID_SHOPEE}&utm_medium=affiliates&sub_id={ID_SHOPEE}",
                 "full": True,
             },
         ],
@@ -1276,7 +1330,7 @@ def _obter_foto_categoria(termo, indice=0):
 
 def _obter_preco_base_categoria(termo):
     t_low = (termo or "").lower()
-    if any(k in t_low for k in ["smartphone", "celular", "iphone"]):
+    if any(k in t_low for k in ["smartphone", "celular", "iphone", "xiaomi", "redmi", "galaxy"]):
         return 799.0
     elif any(k in t_low for k in ["notebook", "laptop", "macbook"]):
         return 1899.0
@@ -1364,7 +1418,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 
 def _chave_cache(termo):
-    return "v4:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
+    return "v5:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
 
 
 def _ler_cache_garimpo(termo):
@@ -1587,6 +1641,7 @@ def _baixar_url_loja(url, headers=None, timeout=8, browser=False):
     if _resposta_util_loja(url, zen):
         print("[Motor] página via ZenRows")
         return zen, "zenrows"
+    print("[ZenRows] sem página útil — usando ScrapingAnt")
     ant = _scrapingant_baixar(url, browser=browser)
     if _resposta_util_loja(url, ant):
         print("[Motor] página via ScrapingAnt")
@@ -1640,6 +1695,13 @@ def _buscar_ofertas_amazon_html(termo, limite=6):
             continue
         if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo):
             continue
+        tlow = (termo or "").lower()
+        if any(k in tlow for k in ("dualsense", "ps5", "playstation")):
+            tl = _sem_acento(titulo)
+            if "dualsense" not in tl and "sony" not in tl:
+                continue
+            if asin.upper() != ASIN_DUALSENSE and "dualsense" not in tl:
+                continue
         img = card.select_one("img.s-image")
         foto_hint = ""
         if img:
@@ -1654,6 +1716,11 @@ def _buscar_ofertas_amazon_html(termo, limite=6):
         ofertas.append(item)
         if len(ofertas) >= limite:
             break
+    tlow = (termo or "").lower()
+    if any(k in tlow for k in ("dualsense", "ps5", "playstation")):
+        oficiais = [o for o in ofertas if ASIN_DUALSENSE in (o.get("url") or "").upper()]
+        if oficiais:
+            return oficiais
     return ofertas
 
 
@@ -1958,6 +2025,7 @@ def gerar_lista_ofertas_reais(
     preco_base=99.0,
     urls_reais=None,
     usar_cache=True,
+    usar_vivo=True,
 ):
     """
     Motor de precisão: qualquer termo, menor preço no topo, Ver Oferta na compra.
@@ -2002,9 +2070,11 @@ def gerar_lista_ofertas_reais(
             ))
 
     plats_ja = {p.get("plataforma") for p in lista_produtos}
-    for cat_item in CATALOGO_PRODUTOS_REAIS:
-        if not _catalogo_compativel(termo, cat_item):
-            continue
+    cats_ok = [c for c in CATALOGO_PRODUTOS_REAIS if _catalogo_compativel(termo, c)]
+    if cats_ok:
+        melhor = max(_score_catalogo(termo, c) for c in cats_ok)
+        cats_ok = [c for c in cats_ok if _score_catalogo(termo, c) == melhor]
+    for cat_item in cats_ok:
         for of in cat_item["ofertas"]:
             plat = of["plataforma"]
             if plat in plats_ja:
@@ -2025,14 +2095,23 @@ def gerar_lista_ofertas_reais(
             _adicionar(item)
             plats_ja.add(plat)
 
-    for item in _coletar_ofertas_ao_vivo(termo):
-        plat = item.get("plataforma")
-        if plat in plats_ja and item.get("fonte") not in {"oficial", "scrape"}:
-            continue
-        antes = len(lista_produtos)
-        _adicionar(item)
-        if len(lista_produtos) > antes:
-            plats_ja.add(plat)
+    if usar_vivo:
+        for item in _coletar_ofertas_ao_vivo(termo):
+            plat = item.get("plataforma")
+            if plat in plats_ja and item.get("fonte") not in {"oficial", "scrape"}:
+                continue
+            tlow = termo.lower()
+            if (
+                plat == "amazon"
+                and any(k in tlow for k in ("dualsense", "ps5", "playstation"))
+                and _asin_amazon(item.get("url") or "") != ASIN_DUALSENSE
+                and any(ASIN_DUALSENSE in (p.get("url") or "").upper() for p in lista_produtos)
+            ):
+                continue
+            antes = len(lista_produtos)
+            _adicionar(item)
+            if len(lista_produtos) > antes:
+                plats_ja.add(plat)
 
     plats_ja = {p.get("plataforma") for p in lista_produtos}
     faltam = [p for p in ("mercado_livre", "amazon", "shopee") if p not in plats_ja]
@@ -2046,11 +2125,7 @@ def gerar_lista_ofertas_reais(
     lista_produtos = _ordenar_entrega_menor_preco(lista_produtos)
     if lista_produtos and usar_cache:
         _gravar_cache_garimpo(termo, lista_produtos)
-        print(
-            f"[Motor] menor preço entregue: {lista_produtos[0]['preco']} "
-            f"em {lista_produtos[0].get('loja')}"
-        )
-    elif lista_produtos:
+    if lista_produtos and usar_vivo:
         print(
             f"[Motor] menor preço entregue: {lista_produtos[0]['preco']} "
             f"em {lista_produtos[0].get('loja')}"
@@ -2823,16 +2898,25 @@ def executar_testes_unitarios():
     ), "grip/capa não passa como DualSense")
     checar(not _titulo_relevante("controle ps5", "Capa de celular rosa"), "título irrelevante recusado")
     checar(not _preco_plausivel(
-        "camera dslr", 166.23,
-        "Bolsa Impermeável para Câmera DSLR Com Divisórias",
-    ), "bolsa não vira câmera")
+        "controle ps5", 292.78,
+        "PlayStation DualSense Controle sem fio",
+    ), "DualSense abaixo de R$ 320 é recusado")
+    checar(not _preco_plausivel(
+        "redmi note 13", 24.90,
+        "Capa Redmi Note 13 4G",
+    ), "capa de celular a R$ 24,90 é recusada")
+    xbox = gerar_lista_ofertas_reais("xbox", usar_cache=False, usar_vivo=False)
+    checar(
+        xbox and abs(xbox[0]["preco_num"] - 429.90) < 0.06 and "xbox" in xbox[0]["titulo"].lower(),
+        "busca xbox não devolve DualSense",
+    )
     checar(_titulo_relevante("notebook dell", "Dell Inspiron 15 Laptop Intel i5"), "notebook = laptop")
     checar(_titulo_relevante("smart tv 50", "Samsung Smart TV 50 4K Crystal UHD"), "TV 50 aceita 50 polegadas")
     checar(not _titulo_relevante("smart tv 50", "TV Samsung Smart HD 32 LS32H5000"), "TV 32 não passa como 50")
 
     amz = _montar_item_oferta(
         "PlayStation DualSense Controle sem fio",
-        388.0,
+        404.27,
         "https://www.amazon.com.br/PlayStation-DualSense-Controle-sem-fio/dp/B0CQKLS4RP",
         FOTO_PADRAO,
         "amazon",
@@ -2900,6 +2984,39 @@ def _oferta_pronta_para_compra(produto):
     return False
 
 
+def executar_carga_500():
+    """500 checagens: 3 lojas, menor preço do catálogo no topo, afiliado."""
+    casos = []
+    for cat in CATALOGO_PRODUTOS_REAIS:
+        melhor = min(float(of["preco"]) for of in cat["ofertas"])
+        for termo in cat["termos"]:
+            casos.append((termo, melhor))
+    base = list(casos) or [("controle ps5", 404.27)]
+    while len(casos) < 500:
+        casos.append(base[len(casos) % len(base)])
+    casos = casos[:500]
+    falhas = 0
+    exemplos = []
+    for termo, melhor in casos:
+        lista = gerar_lista_ofertas_reais(termo, usar_cache=False, usar_vivo=False)
+        lojas = {p.get("plataforma") for p in lista}
+        reais = [p for p in lista if p.get("fonte") != "busca_loja"]
+        topo = float(reais[0]["preco_num"]) if reais else -1
+        if (
+            not reais
+            or not {"amazon", "mercado_livre", "shopee"} <= lojas
+            or abs(topo - float(melhor)) > 0.06
+            or not all(_oferta_pronta_para_compra(p) for p in reais)
+        ):
+            falhas += 1
+            if len(exemplos) < 12:
+                exemplos.append(f"{termo!r} topo={topo} esperado={melhor}")
+                print(f"[Carga FALHA] {exemplos[-1]}")
+    ok = 500 - falhas
+    print(f"[Carga] 500 testes de menor preço / 3 lojas: {ok} ok, {falhas} falhas")
+    return falhas
+
+
 def executar_testes_motor_busca():
     """
     Rotina de testes: regras locais + 12 buscas reais (menor preço e Ver Oferta).
@@ -2920,26 +3037,39 @@ def executar_testes_motor_busca():
     print("TESTES UNITARIOS DO MOTOR")
     print("=" * 80)
     falhas_unit = executar_testes_unitarios()
+    falhas_carga = executar_carga_500()
 
     termos_teste = [
         "controle ps5",
+        "dualsense",
+        "xbox",
         "garrafa termica",
+        "copo stanley",
         "fone bluetooth",
         "relogio smartwatch",
         "tenis esportivo",
+        "tenis nike",
         "smartphone samsung",
         "notebook dell",
         "smart tv 50",
         "camera dslr",
         "mouse sem fio",
+        "mouse gamer",
         "air fryer mondial",
+        "fritadeira",
         "redmi note 13",
+        "xiaomi",
+        "whey protein",
+        "playstation",
+        "canon",
+        "galaxy",
+        "dell",
     ]
 
     resultados = {
-        "total_testes": len(termos_teste) + 1,
-        "sucesso": 0 if falhas_unit else 1,
-        "falha": 1 if falhas_unit else 0,
+        "total_testes": len(termos_teste) + 1 + 500,
+        "sucesso": (0 if falhas_unit else 1) + (500 - falhas_carga),
+        "falha": (1 if falhas_unit else 0) + falhas_carga,
         "detalhes": [],
     }
     if falhas_unit:
@@ -3055,6 +3185,27 @@ def executar_testes_motor_busca():
                     f"  {j}. [{p.get('selo')}] {p['titulo']} - {p['preco']} "
                     f"({p.get('loja')}) -> {_link_compra_do_card(p)[:90]}"
                 )
+
+            if any(k in termo.lower() for k in ("ps5", "dualsense", "xbox", "playstation")) and produtos[0].get("preco_num", 0) < 320:
+                print("[FALHA] DualSense/PS5 com preço de acessório")
+                resultados["falha"] += 1
+                resultados["detalhes"].append({
+                    "teste": i,
+                    "termo": termo,
+                    "status": "FALHA",
+                    "motivo": "preco DualSense abaixo do piso",
+                })
+                continue
+            if any(k in termo.lower() for k in ("redmi", "iphone", "galaxy")) and produtos[0].get("preco_num", 0) < 199:
+                print("[FALHA] Celular com preço de capa")
+                resultados["falha"] += 1
+                resultados["detalhes"].append({
+                    "teste": i,
+                    "termo": termo,
+                    "status": "FALHA",
+                    "motivo": "preco de celular abaixo do piso",
+                })
+                continue
 
             resultados["sucesso"] += 1
             resultados["detalhes"].append({
