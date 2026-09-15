@@ -287,8 +287,18 @@ def _eh_link_produto(url, plataforma):
     if plataforma == "amazon":
         return "amazon." in u and ("/dp/" in u or "/gp/product/" in u or "/s?" in u)
     if plataforma == "mercado_livre":
+        if _parece_url_conteudo(u):
+            return False
         return (
-            "mercadolivre." in u or "mercadolibre." in u
+            "/p/" in u
+            or "/mlb" in u
+            or "produto.mercadolivre." in u
+            or "produto.mercadolibre." in u
+            or "lista.mercadolivre." in u
+            or "listado.mercadolivre." in u
+            or "listado.mercadolibre." in u
+            or "orderid_price" in u
+            or "/jm/search" in u
         )
     if plataforma == "shopee":
         return "shopee.com.br/search" in u or "-i." in u or "/product/" in u
@@ -558,6 +568,31 @@ def _titulo_usado(titulo):
     )
 
 
+def _parece_url_conteudo(url):
+    u = (url or "").lower()
+    return any(
+        x in u for x in (
+            "/magazine", "/blog", "/noticias", "/ajuda", "/developers",
+            "/comunidade", "/forum", "/institucional", "/melistore",
+        )
+    )
+
+
+def _parece_artigo_nao_produto(titulo):
+    t = _sem_acento(titulo)
+    return any(
+        x in t for x in (
+            "vale a pena", "qual versao", "qual e a diferenca",
+            "review", "unboxing", "comparativo", "como escolher",
+            "guia de compra", "tudo sobre", "fique por dentro",
+            "testamos", "analise completa", "versus", " saiba se",
+            "descubra se", "qual modelo",
+        )
+    ) or ("?" in (titulo or "") and any(
+        x in t for x in ("qual ", "vale ", "melhor ", "como ", "porque ", "por que ")
+    ))
+
+
 def _titulo_relevante(termo, titulo):
     if _titulo_usado(titulo):
         return False
@@ -565,7 +600,13 @@ def _titulo_relevante(termo, titulo):
     if not toks:
         return True
     t = _sem_acento(titulo)
+    if _parece_artigo_nao_produto(titulo):
+        return False
     if _parece_acessorio_barato(titulo, termo):
+        return False
+    if any(w in toks for w in ("redmi", "iphone", "galaxy", "xiaomi")) and not any(
+        x in t for x in ("gb", "ram", "smartphone", "celular", "desbloqueado", "dual sim")
+    ):
         return False
     nums = [w for w in toks if w.isdigit()]
     if any(not _token_no_titulo(n, t) for n in nums):
@@ -633,8 +674,10 @@ def _preco_plausivel(termo, preco, titulo):
         piso = 5.0
     if any(k in tlow for k in ("dualsense", "ps5", "playstation", "xbox")):
         piso = max(piso, 320.0)
-    if any(k in tlow for k in ("redmi", "iphone", "xiaomi", "smartphone", "celular", "galaxy")):
+    if any(k in tlow for k in ("smartphone", "celular")):
         piso = max(piso, 199.0)
+    if any(k in tlow for k in ("redmi", "iphone", "xiaomi", "galaxy")):
+        piso = max(piso, 449.0)
     return preco >= piso
 
 
@@ -1250,7 +1293,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 
 def _chave_cache(termo):
-    return "v12:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
+    return "v13:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
 
 
 def _ler_cache_garimpo(termo):
@@ -1625,6 +1668,8 @@ def _item_google(termo, titulo, preco, href, foto, plat, origem=""):
     if not plat:
         plat = _plataforma_loja(href) or _loja_do_texto(titulo)
     if not plat or preco <= 0:
+        return None
+    if _parece_artigo_nao_produto(titulo) or _parece_url_conteudo(href):
         return None
     if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo):
         return None
@@ -3438,6 +3483,22 @@ def executar_testes_unitarios():
         "controle ps5",
         "Suporte Controle PS5 Playstation 5 DualSense | Shopee Brasil",
     ), "suporte/base não passa como DualSense")
+    checar(not _titulo_relevante(
+        "redmi note 13",
+        "Redmi Note 13: Qual versão vale a pena? - Mercado Livre",
+    ), "artigo/review não passa como celular")
+    checar(not _preco_plausivel(
+        "redmi note 13", 200.0,
+        "Smartphone Xiaomi Redmi Note 13 4G 128GB",
+    ), "Redmi a R$ 200 é recusado")
+    artigo_ml = _ofertas_de_itens_serper("redmi note 13", [{
+        "title": "Redmi Note 13: Qual versão vale a pena? - Mercado Livre",
+        "source": "Mercado Livre",
+        "price": "R$ 200,00",
+        "link": "https://www.mercadolivre.com.br/magazine/redmi-note-13",
+        "imageUrl": "https://http2.mlstatic.com/D_NQ_NP_artigo-O.jpg",
+    }])
+    checar(not artigo_ml, "organic de revista ML não entra no ranking")
     checar(not _preco_plausivel(
         "controle ps5", 292.78,
         "PlayStation DualSense Controle sem fio",
@@ -3799,7 +3860,7 @@ def executar_testes_motor_busca():
                     "motivo": "preco DualSense abaixo do piso",
                 })
                 continue
-            if any(k in termo.lower() for k in ("redmi", "iphone", "galaxy")) and produtos[0].get("preco_num", 0) < 199:
+            if any(k in termo.lower() for k in ("redmi", "iphone", "galaxy")) and produtos[0].get("preco_num", 0) < 449:
                 print("[FALHA] Celular com preço de capa")
                 resultados["falha"] += 1
                 resultados["detalhes"].append({
@@ -3835,7 +3896,7 @@ def executar_testes_motor_busca():
     print("=" * 80)
     for i, (termo, piso) in enumerate((
         ("controle ps5", 320.0),
-        ("redmi note 13", 199.0),
+        ("redmi note 13", 449.0),
         ("cabo usb tipo c", 5.0),
     ), 1):
         print(f"\n[Vivo {i}/3] '{termo}'")
