@@ -565,6 +565,14 @@ def _titulo_relevante(termo, titulo):
     if not toks:
         return True
     t = _sem_acento(titulo)
+    if _parece_acessorio_barato(titulo, termo):
+        return False
+    nums = [w for w in toks if w.isdigit()]
+    if any(not _token_no_titulo(n, t) for n in nums):
+        return False
+    if any(w in toks for w in ("ps5", "playstation")) and "xbox" not in toks:
+        if "dualsense" not in t and "sony" not in t:
+            return False
     hits = sum(1 for w in toks if _token_no_titulo(w, t))
     if len(toks) <= 3:
         return hits == len(toks)
@@ -586,10 +594,12 @@ def _parece_acessorio_barato(titulo, termo=""):
         return True
     if any(k in tl for k in ("redmi", "iphone", "xiaomi", "smartphone", "celular", "galaxy")) and (
         re.search(r"\bcapas?\b", t)
+        or re.search(r"\btela\b", t)
         or any(
             x in t for x in (
                 "capinha", "pelicula", " case", "case ", "cover", "bumper",
                 "vidro temperado", "protetor de tela", "cabo usb",
+                "display", "modulo", "pb para", "peca para",
             )
         )
     ):
@@ -1238,7 +1248,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 
 def _chave_cache(termo):
-    return "v10:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
+    return "v11:" + re.sub(r"\s+", " ", (termo or "").strip().lower())
 
 
 def _ler_cache_garimpo(termo):
@@ -1481,7 +1491,7 @@ def _sessao_http():
 
 
 def _baixar_url_loja(url, headers=None, timeout=8, browser=False, avisar=True):
-    """Tenta direto; se a página for bloqueio, ZenRows; se falhar, ScrapingAnt."""
+    """Tenta direto; ZenRows/ScrapingAnt só se a chave existir."""
     if requests is None:
         return "", ""
     try:
@@ -1492,18 +1502,26 @@ def _baixar_url_loja(url, headers=None, timeout=8, browser=False, avisar=True):
             return corpo, "direto"
     except Exception as e:
         print(f"[HTTP loja] {e}")
-    zen = _zenrows_baixar(url)
-    if _resposta_util_loja(url, zen):
+    if _chaves_env("ZENROWS_API_KEY", "ZENROWS_KEY"):
+        zen = _zenrows_baixar(url)
+        if _resposta_util_loja(url, zen):
+            if avisar:
+                print("[Motor] página via ZenRows")
+            return zen, "zenrows"
+    if _chaves_env(
+        "SCRAPINGANT_API_KEY",
+        "SCRAPING_ANT_KEY",
+        "SCRAPINGANT_KEY",
+        "SCRAPING_ANT_KEY_2",
+        "SCRAPINGANT_API_KEY_2",
+    ):
         if avisar:
-            print("[Motor] página via ZenRows")
-        return zen, "zenrows"
-    if avisar:
-        print("[ZenRows] sem página útil — usando ScrapingAnt")
-    ant = _scrapingant_baixar(url, browser=browser)
-    if _resposta_util_loja(url, ant):
-        if avisar:
-            print("[Motor] página via ScrapingAnt")
-        return ant, "scrapingant"
+            print("[ZenRows] sem página útil — usando ScrapingAnt")
+        ant = _scrapingant_baixar(url, browser=browser)
+        if _resposta_util_loja(url, ant):
+            if avisar:
+                print("[Motor] página via ScrapingAnt")
+            return ant, "scrapingant"
     return "", ""
 
 
@@ -1788,7 +1806,7 @@ def _ofertas_de_itens_serper(termo, itens, limite=8):
     for it in itens or []:
         if not isinstance(it, dict):
             continue
-        if it.get("source") and not _source_loja_oficial(it.get("source")):
+        if not _item_serper_loja_ok(it):
             continue
         titulo = (it.get("title") or it.get("name") or termo or "").strip()
         blob = " ".join(str(it.get(k) or "") for k in ("source", "domain", "title", "snippet", "link"))
@@ -1806,7 +1824,14 @@ def _ofertas_de_itens_serper(termo, itens, limite=8):
     return ofertas[:limite]
 
 
-def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20):
+def _item_serper_loja_ok(it):
+    if not isinstance(it, dict):
+        return False
+    src = it.get("source") or it.get("domain") or ""
+    href = _href_item_serper(it)
+    return _source_loja_oficial(src) or _plataforma_loja(href) in {
+        "amazon", "mercado_livre", "shopee",
+    }
     """
     Função principal: cache → POST Serper Shopping (BR) → só Amazon/ML/Shopee
     → preço float → menor preço no topo.
@@ -1845,7 +1870,7 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20):
         return []
     shopping = [
         it for it in (dados.get("shopping") or [])
-        if isinstance(it, dict) and _source_loja_oficial(it.get("source") or "")
+        if isinstance(it, dict) and _item_serper_loja_ok(it)
     ]
     ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite)
     ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas))
@@ -1855,68 +1880,58 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20):
     return ofertas
 
 
-def _buscar_ofertas_serper(termo, limite=8):
-    """Shopping Serper + busca orgânica se faltar loja — sem gravar cache (o motor grava)."""
-    ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=False, limite=limite)
-    plats = {p.get("plataforma") for p in ofertas}
-    if len(plats) < 3 and _chave_serper():
-        dados2 = _serper_post("/search", {
-            "q": f"{(termo or '').strip()} site:amazon.com.br OR site:mercadolivre.com.br OR site:shopee.com.br",
+def _completar_lojas_serper(termo, ofertas, limite=8):
+    """Uma busca Serper por loja que faltar (Amazon, ML, Shopee)."""
+    sites = (
+        ("amazon", "site:amazon.com.br"),
+        ("mercado_livre", "site:mercadolivre.com.br"),
+        ("shopee", "site:shopee.com.br"),
+    )
+    t = (termo or "").strip()
+    for plat, site in sites:
+        if plat in {p.get("plataforma") for p in ofertas}:
+            continue
+        dados = _serper_post("/search", {
+            "q": f"{t} {site}",
+            "gl": "br",
+            "hl": "pt-br",
+            "num": 8,
+        })
+        for item in _ofertas_de_itens_serper(t, dados.get("organic") or [], limite):
+            if item.get("plataforma") == plat:
+                ofertas = _guardar_melhor_loja(ofertas, item)
+                break
+        if plat in {p.get("plataforma") for p in ofertas}:
+            continue
+        dados = _serper_post("/shopping", {
+            "q": f"{t} {site}",
             "gl": "br",
             "hl": "pt-br",
             "num": 10,
         })
-        for item in _ofertas_de_itens_serper(termo, dados2.get("organic") or [], limite):
-            ofertas = _guardar_melhor_loja(ofertas, item)
-        ofertas = _ordenar_entrega_menor_preco(ofertas)
+        for item in _ofertas_de_itens_serper(t, dados.get("shopping") or [], limite):
+            if item.get("plataforma") == plat:
+                ofertas = _guardar_melhor_loja(ofertas, item)
+                break
+    return ofertas
+
+
+def _buscar_ofertas_serper(termo, limite=8):
+    """Shopping Serper + uma busca por loja que faltar."""
+    ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=False, limite=limite)
+    ofertas = _completar_lojas_serper(termo, ofertas, limite=limite)
+    ofertas = _ordenar_entrega_menor_preco(ofertas)
     if ofertas:
         print(f"[Serper] {len(ofertas[:limite])} ofertas do Google")
     return ofertas[:limite]
 
 
 def _buscar_ofertas_google_shopping(termo, limite=8):
-    """Serper no ar; scrape HTML só se a chave Serper não vier."""
-    serper = _buscar_ofertas_serper(termo, limite)
-    if serper:
-        return serper
-    if requests is None or BeautifulSoup is None or not (termo or "").strip():
-        return []
-    q = urllib.parse.quote(termo.strip())
-    urls = (
-        f"https://www.google.com/search?q={q}&tbm=shop&gbv=1&hl=pt-BR&gl=br&num=20&pws=0",
-        f"https://www.google.com/search?udm=28&gbv=1&hl=pt-BR&gl=br&num=20&pws=0&q={q}",
-        f"https://www.google.com/search?tbm=shop&hl=pt-BR&gl=br&num=20&pws=0&q={q}",
-        (
-            "https://www.google.com/search?gbv=1&hl=pt-BR&gl=br&num=10&pws=0&q="
-            f"{q}+(site:amazon.com.br+OR+site:mercadolivre.com.br+OR+site:shopee.com.br)"
-        ),
-    )
-    ofertas = []
-    origem_ok = ""
-    for i, url in enumerate(urls):
-        html, origem = _baixar_url_loja(
-            url, headers=HEADERS_GOOGLE, timeout=12, browser=True, avisar=(i == len(urls) - 1),
-        )
-        if not html:
-            continue
-        lote = _parsear_ofertas_google(html, termo, origem=origem, limite=limite)
-        if lote:
-            origem_ok = origem
-            plats = {p.get("plataforma") for p in ofertas}
-            for item in lote:
-                if item.get("plataforma") in plats:
-                    atual = next(p for p in ofertas if p.get("plataforma") == item.get("plataforma"))
-                    if item["preco_num"] < atual["preco_num"]:
-                        ofertas = [p for p in ofertas if p.get("plataforma") != item.get("plataforma")]
-                        ofertas.append(item)
-                    continue
-                ofertas.append(item)
-                plats.add(item.get("plataforma"))
-            if len(plats) >= 3:
-                break
-    ofertas.sort(key=lambda p: p.get("preco_num") or 9e9)
-    print(f"[Google] {len(ofertas)} ofertas do produto em {origem_ok or 'falha'}")
-    return ofertas[:limite]
+    """Serper no ar. Sem chave, não raspa Google (bloqueado no Railway)."""
+    if _chave_serper():
+        return _buscar_ofertas_serper(termo, limite)
+    print("[Google] sem SERPER_API_KEY — pulando scrape")
+    return []
 
 
 def _marcar_fonte_scrape(item, origem):
@@ -2274,20 +2289,17 @@ def _buscar_ofertas_shopee_afiliado(termo, limite=8):
 
 
 def _coletar_ofertas_ao_vivo(termo):
-    """Consulta ML, Amazon e Shopee em paralelo (API oficial se houver chave)."""
+    """Só APIs oficiais. Sem ZenRows/scrape — no Railway isso travava 90s."""
     ofertas = []
-
-    def _amazon():
-        return _buscar_ofertas_amazon_paapi(termo, 8) or _buscar_ofertas_amazon_html(termo, 6)
-
-    def _shopee():
-        return _buscar_ofertas_shopee_afiliado(termo, 8) or _buscar_ofertas_shopee_api(termo, 6)
-
-    tarefas = (
-        (_buscar_ofertas_ml_api, (termo, 12)),
-        (_amazon, ()),
-        (_shopee, ()),
-    )
+    tarefas = []
+    if (os.environ.get("MELI_ACCESS_TOKEN") or "").strip():
+        tarefas.append((_buscar_ofertas_ml_api, (termo, 12)))
+    if (os.environ.get("AMAZON_ACCESS_KEY") or "").strip():
+        tarefas.append((_buscar_ofertas_amazon_paapi, (termo, 8)))
+    if (os.environ.get("SHOPEE_APP_ID") or "").strip():
+        tarefas.append((_buscar_ofertas_shopee_afiliado, (termo, 8)))
+    if not tarefas:
+        return []
     with ThreadPoolExecutor(max_workers=3) as pool:
         futuros = [pool.submit(fn, *args) for fn, args in tarefas]
         for fut in as_completed(futuros):
@@ -2295,8 +2307,6 @@ def _coletar_ofertas_ao_vivo(termo):
                 ofertas.extend(fut.result() or [])
             except Exception as e:
                 print(f"[Motor ao vivo] {e}")
-    if not any(p.get("plataforma") == "mercado_livre" for p in ofertas):
-        ofertas.extend(_raspar_cards_mercado_livre(termo, limite=8))
     return ofertas
 
 
@@ -3413,7 +3423,15 @@ def executar_testes_unitarios():
         "controle ps5",
         "PlayVital Anti-Skid Sweat-Absorbent Grip for PS5 Edge Wireless Controller",
     ), "grip/capa não passa como DualSense")
-    checar(not _titulo_relevante("controle ps5", "Capa de celular rosa"), "título irrelevante recusado")
+    checar(not _titulo_relevante(
+        "redmi note 13", "Smartphone Xiaomi Redmi Note 14 256GB 8GB RAM",
+    ), "Note 14 não passa como Note 13")
+    checar(not _titulo_relevante(
+        "redmi note 13", "Pb Para Xiaomi Redmi Note 13 Pro + Tela Amoled",
+    ), "tela/peça não passa como celular")
+    checar(not _titulo_relevante(
+        "controle ps5", "Gamrombo Controle sem fio de LED para PS5, compatível com PS",
+    ), "clone LED não passa como DualSense")
     checar(not _preco_plausivel(
         "controle ps5", 292.78,
         "PlayStation DualSense Controle sem fio",
