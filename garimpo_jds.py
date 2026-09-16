@@ -282,6 +282,14 @@ def _serper_locale(pais="BR"):
     return {"gl": "br", "hl": "pt-br"}
 
 
+def _consulta_serper_shopping(termo):
+    """Só o nome do produto. Nunca envia site:amazon / site:shopee / site:mercadolivre."""
+    t = re.sub(r"\s+", " ", (termo or "").strip())
+    t = re.sub(r"\bsite:\S+", "", t, flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
 def _lojas_do_pais(pais="BR"):
     if _normalizar_pais(pais) == "US":
         return ("amazon", "ebay")
@@ -1908,7 +1916,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v23:" + pais + ":" + _termo_cache_norm(termo)
+    return "v24:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2404,8 +2412,11 @@ def _item_google(termo, titulo, preco, href, foto, plat, origem="", pais="BR"):
         return None
     if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo, pais=pais):
         return None
-    if _url_e_busca_loja(href) or not _url_anuncio_exato(href, plat):
+    if _url_e_busca_loja(href):
         return None
+    if not _url_anuncio_exato(href, plat):
+        if origem != "serper" or not str(href or "").startswith("http"):
+            return None
     foto = (foto or "").strip()
     if foto.startswith("//"):
         foto = "https:" + foto
@@ -2695,22 +2706,30 @@ def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
         titulo = bloco["title"]
         if _titulo_e_acessorio_imediato(titulo):
             continue
-        if not _item_serper_loja_ok(it, pais=pais):
+        src = bloco["source"]
+        if not _source_loja_oficial(src, pais=pais):
             continue
         href = _href_item_serper(it)
-        plat_src = _loja_do_texto(bloco["source"])
+        if not href or _url_e_busca_loja(href):
+            bruto = str(bloco.get("link") or it.get("productLink") or it.get("merchantLink") or "")
+            href = _desempacotar_link_google(bruto) or bruto.strip()
+            if _url_e_busca_loja(href):
+                href = ""
+        plat_src = _loja_do_texto(src)
         plat_link = _plataforma_loja(href)
         if plat_src and plat_link and plat_src != plat_link:
             continue
-        plat = plat_link or plat_src
-        if not plat or not _url_anuncio_exato(href, plat):
+        plat = plat_src or plat_link
+        if not plat or plat not in _lojas_do_pais(pais):
+            continue
+        if not href.startswith("http"):
             continue
         if not _titulo_relevante(termo, titulo) and not _termo_contido_no_titulo(termo, titulo):
             continue
         preco = _preco_item_serper(it, pais=pais)
         foto = bloco["imageUrl"]
         item = _item_google(termo, titulo, preco, href, foto, plat, origem="serper", pais=pais)
-        if not item or not _url_anuncio_exato(item.get("url"), plat):
+        if not item or _url_e_busca_loja(item.get("url")):
             continue
         ofertas = _guardar_melhor_loja(ofertas, item)
     ofertas.sort(key=_rank_oferta_real)
@@ -2767,6 +2786,9 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
     if not chave or requests is None:
         return []
     loc = _serper_locale(pais)
+    q = _consulta_serper_shopping(t)
+    if not q:
+        return []
     try:
         resp = requests.post(
             "https://google.serper.dev/shopping",
@@ -2774,7 +2796,7 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
                 "X-API-KEY": chave,
                 "Content-Type": "application/json",
             },
-            json={"q": t, "gl": loc["gl"], "hl": loc["hl"], "num": min(int(limite or 20), 40)},
+            json={"q": q, "gl": loc["gl"], "hl": loc["hl"], "num": min(int(limite or 20), 40)},
             timeout=18,
         )
         if resp.status_code >= 400:
@@ -2788,7 +2810,9 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
         return []
     shopping = [
         it for it in (dados.get("shopping") or [])
-        if isinstance(it, dict) and _item_serper_loja_ok(it, pais=pais)
+        if isinstance(it, dict) and _source_loja_oficial(
+            str(it.get("source") or it.get("domain") or ""), pais=pais,
+        )
     ]
     ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite, pais=pais)
     ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
@@ -2875,73 +2899,14 @@ def _juntar_preco_shopping_url_anuncio(termo, shopping, organicos, plat, pais="B
 
 
 def _completar_lojas_serper(termo, ofertas, limite=8, pais="BR"):
-    """Uma busca Serper por loja que faltar: shopping + anúncio orgânico da mesma loja."""
-    pais = _normalizar_pais(pais)
-    loc = _serper_locale(pais)
-    if pais == "US":
-        sites = (
-            ("amazon", "site:amazon.com -site:amazon.com.br"),
-            ("ebay", "site:ebay.com"),
-        )
-    else:
-        sites = (
-            ("amazon", "site:amazon.com.br"),
-            ("mercado_livre", "site:mercadolivre.com.br"),
-            ("shopee", "site:shopee.com.br"),
-        )
-    t = (termo or "").strip()
-    for plat, site in sites:
-        atual = next((p for p in ofertas if p.get("plataforma") == plat), None)
-        if atual and _url_anuncio_exato(atual.get("url"), plat):
-            continue
-        consulta = f"{t} {site}"
-        if plat == "amazon" and pais == "BR" and any(
-            k in t.lower() for k in ("ps5", "dualsense", "playstation")
-        ):
-            consulta = f"DualSense {ASIN_DUALSENSE} {t} {site}"
-        dados_shop = _serper_post("/shopping", {
-            "q": consulta,
-            "gl": loc["gl"],
-            "hl": loc["hl"],
-            "num": 10,
-        })
-        shop_raw = dados_shop.get("shopping") or []
-        for item in _ofertas_de_itens_serper(t, shop_raw, limite, pais=pais):
-            if item.get("plataforma") == plat:
-                ofertas = _guardar_melhor_loja(ofertas, item)
-        tem_exato = any(
-            p.get("plataforma") == plat and _url_anuncio_exato(p.get("url"), plat)
-            for p in ofertas
-        )
-        if tem_exato:
-            continue
-        dados_org = _serper_post("/search", {
-            "q": consulta,
-            "gl": loc["gl"],
-            "hl": loc["hl"],
-            "num": 8,
-        })
-        org_raw = dados_org.get("organic") or []
-        for item in _ofertas_de_itens_serper(t, org_raw, limite, pais=pais):
-            if item.get("plataforma") == plat:
-                ofertas = _guardar_melhor_loja(ofertas, item)
-        tem_exato = any(
-            p.get("plataforma") == plat and _url_anuncio_exato(p.get("url"), plat)
-            for p in ofertas
-        )
-        if tem_exato:
-            continue
-        juntado = _juntar_preco_shopping_url_anuncio(t, shop_raw, org_raw, plat, pais=pais)
-        if juntado and juntado.get("plataforma") == plat:
-            ofertas = _guardar_melhor_loja(ofertas, juntado)
-    return ofertas
+    """Não usa site: nem segunda chamada. O JSON único do Shopping já veio filtrado."""
+    return ofertas or []
 
 
 def _buscar_ofertas_serper(termo, limite=8, pais="BR"):
-    """Shopping Serper + uma busca por loja que faltar."""
+    """Uma única chamada Shopping com o nome do produto; filtro de loja no JSON."""
     pais = _normalizar_pais(pais)
     ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=False, limite=limite, pais=pais)
-    ofertas = _completar_lojas_serper(termo, ofertas, limite=limite, pais=pais)
     ofertas = _ordenar_entrega_menor_preco(ofertas)
     if ofertas:
         print(f"[Serper] {len(ofertas[:limite])} ofertas do Google ({pais})")
@@ -3484,12 +3449,6 @@ def gerar_lista_ofertas_reais(
             if len(lista_produtos) > antes:
                 plats_ja.add(item.get("plataforma"))
         plats_ja = {p.get("plataforma") for p in lista_produtos}
-        if len(plats_ja) < len(_lojas_do_pais(pais)):
-            for item in _completar_lojas_serper(termo, list(lista_produtos), limite=8, pais=pais):
-                antes = len(lista_produtos)
-                _adicionar(item)
-                if len(lista_produtos) > antes:
-                    plats_ja.add(item.get("plataforma"))
         if pais == "BR" and len(plats_ja) < 3:
             for item in _coletar_ofertas_ao_vivo(termo):
                 plat = item.get("plataforma")
@@ -4778,6 +4737,16 @@ def executar_testes_unitarios():
     loc_br = _serper_locale("BR")
     checar(loc_us == {"gl": "us", "hl": "en"}, "Serper EUA usa gl=us hl=en")
     checar(loc_br == {"gl": "br", "hl": "pt-br"}, "Serper BR usa gl=br hl=pt-br")
+    checar(
+        _consulta_serper_shopping("garrafa de café") == "garrafa de café"
+        and _consulta_serper_shopping("bicicleta") == "bicicleta"
+        and "site:" not in _consulta_serper_shopping("bicicleta site:shopee.com.br"),
+        "payload q da Serper é só o nome do produto",
+    )
+    checar(
+        _completar_lojas_serper("garrafa de café", []) == [],
+        "não dispara busca extra por loja",
+    )
     checar(_source_loja_oficial("eBay", pais="US") and _source_loja_oficial("Amazon.com", pais="US"),
            "filtro US aceita Amazon e eBay")
     checar(not _source_loja_oficial("Shopee", pais="US") and not _source_loja_oficial("Mercado Livre", pais="US"),
