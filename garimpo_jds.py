@@ -749,6 +749,21 @@ def _link_compra_do_card(produto):
     return aplicar_afiliado_por_dominio(url)
 
 
+def _link_ver_oferta(produto):
+    """Ver Oferta: página do anúncio mais barato daquele card, já com afiliado."""
+    p = produto if isinstance(produto, dict) else {}
+    plat = p.get("plataforma") or _plataforma_loja(p.get("url") or "")
+    pais = _normalizar_pais(p.get("pais") or "BR")
+    fonte = (p.get("fonte") or "").lower()
+    if fonte == "catalogo":
+        return _link_compra_do_card(p)
+    for bruto in (p.get("url"), p.get("link"), p.get("link_afiliado")):
+        can = _url_canonica_loja((bruto or "").strip(), plat, pais=pais)
+        if _url_anuncio_exato(can, plat):
+            return aplicar_afiliado_por_dominio(can)
+    return _link_compra_do_card(p)
+
+
 def _nome_loja(plataforma):
     return NOMES_LOJA.get(plataforma, "Loja")
 
@@ -1810,8 +1825,8 @@ def _ordenar_entrega_menor_preco(lista_produtos):
             melhor_por_loja[plat] = p
             continue
         if abs(p["preco_num"] - atual["preco_num"]) <= 1.0:
-            p_compra = _eh_pagina_compra(p.get("url"), plat)
-            a_compra = _eh_pagina_compra(atual.get("url"), plat)
+            p_compra = _url_anuncio_exato(p.get("url"), plat)
+            a_compra = _url_anuncio_exato(atual.get("url"), plat)
             if p_compra and not a_compra:
                 melhor_por_loja[plat] = p
 
@@ -3128,15 +3143,7 @@ def _carimbar_lista_afiliado(lista, pais="BR"):
     for p in lista or []:
         p_pais = _normalizar_pais(p.get("pais") or pais)
         p["pais"] = p_pais
-        url = (p.get("url") or "").strip()
-        plat = p.get("plataforma") or _plataforma_loja(url)
-        fonte = (p.get("fonte") or "").lower()
-        if fonte in {"google", "scrape", "oficial"} and url.startswith("http"):
-            p["url"] = aplicar_afiliado_por_dominio(url)
-        elif plat == "amazon" and (p_pais == "US" or _host_amazon_eua(url)):
-            p["url"] = aplicar_tag_amazon_eua(url)
-        else:
-            p["url"] = _link_compra_do_card(p)
+        p["url"] = _link_ver_oferta(p)
         app = serializar_oferta_app(p, pais=p_pais)
         p.update(app)
     return lista
@@ -3610,7 +3617,7 @@ def main(page):
             except Exception:
                 pass
             snack(tx("cupom"), "#00F5D4")
-            url_abrir = prod.get("link_afiliado") or _link_compra_do_card(prod)
+            url_abrir = _link_ver_oferta(prod)
             try:
                 await page.launch_url(url_abrir)
             except TypeError:
@@ -3761,7 +3768,7 @@ def main(page):
                     snack(tx("removido"), "#9D4EDD")
 
             async def abrir_desejo(e, prod=item):
-                url = _link_compra_do_card(prod)
+                url = _link_ver_oferta(prod)
                 fechar_todos_dialogos()
                 try:
                     await page.clipboard.set(CUPOM_JDS)
@@ -4203,6 +4210,23 @@ def executar_testes_unitarios():
     checar(
         "/dp/B0CQKLS4RP" in _link_compra_do_card(amz_g) and f"tag={ID_AMAZON}" in _link_compra_do_card(amz_g),
         "Ver Oferta Amazon abre o /dp/ do produto mais barato",
+    )
+    misturado = {
+        "titulo": "PlayStation DualSense",
+        "preco_num": 404.27,
+        "url": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+        "link_afiliado": "https://www.amazon.com.br/s?k=dualsense&s=price-asc-rank&tag=jdseconomiz0e-20",
+        "foto": FOTO_PADRAO,
+        "plataforma": "amazon",
+        "fonte": "google",
+        "pais": "BR",
+        "loja": "Amazon",
+    }
+    checar(
+        "/dp/B0CQKLS4RP" in _link_ver_oferta(misturado)
+        and "/s?" not in _link_ver_oferta(misturado)
+        and f"tag={ID_AMAZON}" in _link_ver_oferta(misturado),
+        "Ver Oferta ignora busca da loja e abre o anúncio mais barato",
     )
     checar(
         "/p/MLB32344506" in _link_compra_do_card(ml_g)
