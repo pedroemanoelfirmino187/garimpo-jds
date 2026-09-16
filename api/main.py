@@ -152,7 +152,6 @@ def _autorizar_app(
 def _resposta_ofertas(termo, ofertas, pais="BR"):
     pais = _normalizar_pais(pais)
     lista = serializar_lista_app(ofertas or [], pais=pais)
-    lista.sort(key=lambda p: float(p.get("preco_numerico") or 9e9))
     campeao = isolar_produto_mais_barato(lista, pais=pais)
     if campeao:
         campeao = serializar_oferta_app(campeao, pais=pais)

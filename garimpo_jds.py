@@ -401,7 +401,7 @@ def serializar_oferta_app(item, pais="BR"):
 def serializar_lista_app(lista, pais="BR"):
     pais = _normalizar_pais(pais)
     saida = [serializar_oferta_app(p, pais=pais) for p in (lista or []) if isinstance(p, dict)]
-    saida.sort(key=lambda x: x.get("preco_numerico") or 9e9)
+    saida.sort(key=_rank_oferta_real)
     return saida
 
 
@@ -1833,6 +1833,21 @@ def _obter_preco_base_categoria(termo):
     return 69.90
 
 
+def _rank_oferta_real(p):
+    """Anúncio /dp/ /p/ primeiro. Lista de busca não ganha com preço de vitrine."""
+    plat = (p or {}).get("plataforma")
+    try:
+        preco = float((p or {}).get("preco_num") or 9e9)
+    except (TypeError, ValueError):
+        preco = 9e9
+    fonte = ((p or {}).get("fonte") or "").lower()
+    if fonte == "busca_loja":
+        return (2, preco)
+    if _url_anuncio_exato((p or {}).get("url") or (p or {}).get("link"), plat):
+        return (0, preco)
+    return (1, preco)
+
+
 def _ordenar_entrega_menor_preco(lista_produtos):
     """Garante o menor valor no topo e só a oferta mais barata de cada loja."""
     validos = []
@@ -1853,16 +1868,10 @@ def _ordenar_entrega_menor_preco(lista_produtos):
     for p in validos:
         plat = p.get("plataforma") or "outro"
         atual = melhor_por_loja.get(plat)
-        if atual is None or p["preco_num"] < atual["preco_num"]:
+        if atual is None or _rank_oferta_real(p) < _rank_oferta_real(atual):
             melhor_por_loja[plat] = p
-            continue
-        if abs(p["preco_num"] - atual["preco_num"]) <= 1.0:
-            p_compra = _url_anuncio_exato(p.get("url"), plat)
-            a_compra = _url_anuncio_exato(atual.get("url"), plat)
-            if p_compra and not a_compra:
-                melhor_por_loja[plat] = p
 
-    ordenados = sorted(melhor_por_loja.values(), key=lambda x: x["preco_num"])
+    ordenados = sorted(melhor_por_loja.values(), key=_rank_oferta_real)
     for i, p in enumerate(ordenados):
         if p.get("fonte") == "busca_loja":
             p["selo"] = "BUSCA NA LOJA"
@@ -1879,7 +1888,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v20:" + pais + ":" + _termo_cache_norm(termo)
+    return "v21:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2536,17 +2545,43 @@ def _preco_item_serper(it, pais="BR"):
 
 
 def _href_item_serper(it):
-    """Link só deste bloco — não vasculha JSON inteiro (evita URL de outra loja)."""
+    """Link só deste bloco, da mesma loja do source — prefere /dp/ /p/ /itm."""
     if not isinstance(it, dict):
         return ""
-    for k in ("link", "productLink", "merchantLink"):
+    plat_src = _loja_do_texto(str(it.get("source") or it.get("domain") or ""))
+    candidatos = []
+    chaves = ("link", "productLink", "merchantLink", "url")
+    for k in chaves:
         bruto = it.get(k)
         if not isinstance(bruto, str) or not bruto.strip():
             continue
         h = _desempacotar_link_google(bruto.strip())
-        if h and (_plataforma_loja(h) or (h.startswith("http") and "google." not in h.lower())):
-            return h.split("#")[0]
-    return ""
+        if h:
+            candidatos.append(h.split("#")[0])
+    for k, v in it.items():
+        if k in chaves or k in {"snippet", "title", "price", "imageUrl", "image", "source"}:
+            continue
+        if not isinstance(v, str) or "http" not in v.lower():
+            continue
+        h = _desempacotar_link_google(v.strip())
+        if h:
+            candidatos.append(h.split("#")[0])
+
+    def _ok(h):
+        plat = _plataforma_loja(h)
+        if not plat:
+            return False
+        if plat_src and plat != plat_src:
+            return False
+        return True
+
+    validos = [h for h in candidatos if _ok(h)]
+    if not validos:
+        return ""
+    validos.sort(
+        key=lambda h: (0 if _url_anuncio_exato(h, _plataforma_loja(h)) else 1)
+    )
+    return validos[0]
 
 
 def _bloco_serper_isolado(it):
@@ -2569,7 +2604,7 @@ def _item_serper_loja_ok(it, pais="BR"):
     pais = _normalizar_pais(pais)
     bloco = _bloco_serper_isolado(it)
     src = bloco["source"]
-    href = _href_item_serper(bloco)
+    href = _href_item_serper(it)
     plat_src = _loja_do_texto(src) if src else ""
     plat_link = _plataforma_loja(href) if href else ""
     if plat_src and plat_link and plat_src != plat_link:
@@ -2601,21 +2636,23 @@ def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
             continue
         if not _termo_contido_no_titulo(termo, titulo):
             continue
-        if not _item_serper_loja_ok(bloco, pais=pais):
+        if not _item_serper_loja_ok(it, pais=pais):
             continue
-        href = _href_item_serper(bloco)
+        href = _href_item_serper(it)
         plat_src = _loja_do_texto(bloco["source"])
         plat_link = _plataforma_loja(href)
         if plat_src and plat_link and plat_src != plat_link:
             continue
         plat = plat_link or plat_src
+        if not plat or not _url_anuncio_exato(href, plat):
+            continue
         preco = _preco_item_serper(bloco, pais=pais)
         foto = bloco["imageUrl"]
-        ofertas = _guardar_melhor_loja(
-            ofertas,
-            _item_google(termo, titulo, preco, href, foto, plat, origem="serper", pais=pais),
-        )
-    ofertas.sort(key=lambda p: float(p.get("preco_num") or 9e9))
+        item = _item_google(termo, titulo, preco, href, foto, plat, origem="serper", pais=pais)
+        if not item or not _url_anuncio_exato(item.get("url"), plat):
+            continue
+        ofertas = _guardar_melhor_loja(ofertas, item)
+    ofertas.sort(key=_rank_oferta_real)
     return ofertas[:limite]
 
 
@@ -2624,17 +2661,11 @@ def _guardar_melhor_loja(ofertas, item):
         return ofertas
     plat = item.get("plataforma")
 
-    def _rank(p):
-        href = p.get("url") or ""
-        preco = float(p.get("preco_num") or 9e9)
-        exato = 0 if _url_anuncio_exato(href, p.get("plataforma")) else 1
-        return (preco, exato)
-
     atual = next((p for p in ofertas if p.get("plataforma") == plat), None)
     if atual is None:
         ofertas.append(item)
         return ofertas
-    if _rank(item) < _rank(atual):
+    if _rank_oferta_real(item) < _rank_oferta_real(atual):
         return [p for p in ofertas if p.get("plataforma") != plat] + [item]
     return ofertas
 
@@ -2647,7 +2678,7 @@ def isolar_produto_mais_barato(ofertas, pais="BR"):
         if isinstance(p, dict) and float(p.get("preco_num") or p.get("preco_numerico") or 0) > 0
         and float(p.get("preco_num") or p.get("preco_numerico") or 0) < 999990
     ]
-    lista.sort(key=lambda p: float(p.get("preco_num") or p.get("preco_numerico") or 9e9))
+    lista.sort(key=_rank_oferta_real)
     if not lista:
         return None
     carimbada = _carimbar_lista_afiliado([lista[0]], pais=pais)
@@ -2700,7 +2731,6 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
     ]
     ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite, pais=pais)
     ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
-    ofertas.sort(key=lambda p: float(p.get("preco_num") or 9e9))
     if usar_cache and ofertas:
         _gravar_cache_garimpo(t, ofertas, pais=pais)
     print(f"[Serper] {len(ofertas)} ofertas filtradas ({pais}: {', '.join(_lojas_do_pais(pais))})")
@@ -2727,8 +2757,13 @@ def _completar_lojas_serper(termo, ofertas, limite=8, pais="BR"):
         atual = next((p for p in ofertas if p.get("plataforma") == plat), None)
         if atual and _url_anuncio_exato(atual.get("url"), plat):
             continue
+        consulta = f"{t} {site}"
+        if plat == "amazon" and pais == "BR" and any(
+            k in t.lower() for k in ("ps5", "dualsense", "playstation")
+        ):
+            consulta = f"DualSense {ASIN_DUALSENSE} {t} {site}"
         dados = _serper_post("/shopping", {
-            "q": f"{t} {site}",
+            "q": consulta,
             "gl": loc["gl"],
             "hl": loc["hl"],
             "num": 10,
@@ -2743,7 +2778,7 @@ def _completar_lojas_serper(termo, ofertas, limite=8, pais="BR"):
         if tem_exato:
             continue
         dados = _serper_post("/search", {
-            "q": f"{t} {site}",
+            "q": consulta,
             "gl": loc["gl"],
             "hl": loc["hl"],
             "num": 8,
@@ -4385,6 +4420,29 @@ def executar_testes_unitarios():
     checar(
         not any(p.get("plataforma") == "shopee" for p in misturado_serper),
         "capa/capinha/suporte/cabo da Shopee é descartado",
+    )
+    busca_vs_anuncio = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
+        {
+            "title": "Controle DualSense PS5 Sony",
+            "source": "Mercado Livre",
+            "price": "R$ 393,04",
+            "link": "https://lista.mercadolivre.com.br/controle-dualsense-sem-fio-sony_OrderId_PRICE",
+            "imageUrl": "https://http2.mlstatic.com/D_NQ_NP_teste-O.jpg",
+        },
+        {
+            "title": "PlayStation DualSense Controle sem fio PS5",
+            "source": "Amazon.com.br",
+            "price": "R$ 420,00",
+            "link": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+            "imageUrl": "https://m.media-amazon.com/images/I/dual.jpg",
+        },
+    ]))
+    checar(
+        busca_vs_anuncio
+        and busca_vs_anuncio[0].get("plataforma") == "amazon"
+        and "/dp/B0CQKLS4RP" in (busca_vs_anuncio[0].get("url") or "")
+        and not any(p.get("plataforma") == "mercado_livre" for p in busca_vs_anuncio),
+        "lista do ML não vence o /dp/ da Amazon",
     )
     checar(_source_loja_oficial("Amazon.com.br") and _source_loja_oficial("MERCADO LIVRE"),
            "filtro source aceita Amazon e Mercado Livre")
