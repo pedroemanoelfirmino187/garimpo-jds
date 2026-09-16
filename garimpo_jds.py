@@ -1065,6 +1065,9 @@ def _token_no_titulo(tok, titulo):
         "smartwatch": ("smartwatch", "relogio", "watch"),
         "airfryer": ("airfryer", "fritadeira", "air"),
         "controle": ("controle", "dualsense", "joystick", "gamepad"),
+        "ps5": ("ps5", "playstation 5", "playstation5", "dualsense"),
+        "playstation": ("playstation", "ps5", "dualsense"),
+        "dualsense": ("dualsense", "dual sense"),
     }
     for alt in sinonimos.get(tok, ()):
         if alt in titulo:
@@ -1132,8 +1135,10 @@ def _titulo_relevante(termo, titulo):
     if "dualsense" in toks and "dualsense" not in t and "dual sense" not in t:
         return False
     hits = sum(1 for w in toks if _token_no_titulo(w, t))
+    if "dualsense" in toks and ("dualsense" in t or "dual sense" in t):
+        return True if len(toks) == 1 else hits >= 2
     if len(toks) <= 3:
-        return hits == len(toks)
+        return hits >= max(2, len(toks) - 1) if len(toks) >= 2 else hits == 1
     return hits >= max(2, int(len(toks) * 0.7))
 
 
@@ -1852,7 +1857,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v18:" + pais + ":" + _termo_cache_norm(termo)
+    return "v19:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2523,8 +2528,9 @@ def _guardar_melhor_loja(ofertas, item):
 
     def _rank(p):
         href = p.get("url") or ""
+        preco = float(p.get("preco_num") or 9e9)
         exato = 0 if _url_anuncio_exato(href, p.get("plataforma")) else 1
-        return (exato, float(p.get("preco_num") or 9e9))
+        return (preco, exato)
 
     atual = next((p for p in ofertas if p.get("plataforma") == plat), None)
     if atual is None:
@@ -4365,6 +4371,10 @@ def executar_testes_unitarios():
         "controle dualsense ps5",
         "PlayStation DualSense Controle sem fio PS5 Sony Original",
     ), "DualSense original continua no ranking")
+    checar(_titulo_relevante(
+        "controle dualsense ps5",
+        "Controle DualSense Sony PlayStation 5 Original Branco",
+    ), "ML DualSense entra mesmo sem a palavra PS5")
     checar(not _titulo_relevante(
         "redmi note 13",
         "Redmi Note 13: Qual versão vale a pena? - Mercado Livre",
