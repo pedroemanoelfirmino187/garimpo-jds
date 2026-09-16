@@ -27,8 +27,7 @@ from garimpo_jds import (  # noqa: E402
     ID_AMAZON_US,
     ID_MERCADO_LIVRE,
     ID_SHOPEE,
-    _chave_cache,
-    _chaves_env,
+    _arquivo_cache_sqlite,
     _normalizar_pais,
     buscar_ofertas_por_pais,
     buscar_ofertas_serper_shopping,
@@ -124,6 +123,8 @@ def health():
             "app_token": bool((os.environ.get("JDS_API_TOKEN") or "").strip()),
             "cache_sqlite": True,
             "cache_ttl_horas": 2,
+            "cache_arquivo": str(_arquivo_cache_sqlite()),
+            "cache_persistente": bool((os.environ.get("RAILWAY_VOLUME_MOUNT_PATH") or "").strip()),
         },
     }
 

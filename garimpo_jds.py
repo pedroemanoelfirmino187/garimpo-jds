@@ -197,6 +197,7 @@ ARQ_DESEJOS = Path(__file__).resolve().parent / "desejos_jds.json"
 ARQ_PONTOS = Path(__file__).resolve().parent / "pontos_jds.json"
 CACHE_TTL_SEG = 2 * 3600
 _CACHE_LOCK = threading.Lock()
+_MEM_CACHE = {}
 INTERVALO_ALERTA_SEG = 15 * 60
 JDS_API_URL = (os.environ.get("JDS_API_URL") or "").strip().rstrip("/")
 FOTO_PADRAO = "https://images.unsplash.com/photo-1544816155-12df9643f363?w=600&auto=format&fit=crop&q=80"
@@ -1505,34 +1506,48 @@ def _arquivo_cache_sqlite():
     extra = (os.environ.get("CACHE_GARIMPO_DB") or "").strip()
     if extra:
         return Path(extra)
+    mount = (os.environ.get("RAILWAY_VOLUME_MOUNT_PATH") or "").strip()
+    candidatos = []
+    if mount:
+        candidatos.append(Path(mount) / "cache_garimpo.db")
+    if os.name != "nt":
+        data = Path("/data")
+        if data.is_dir():
+            candidatos.append(data / "cache_garimpo.db")
+    candidatos.append(CACHE_GARIMPO_DB)
+    for caminho in candidatos:
+        pasta = caminho.parent
+        try:
+            pasta.mkdir(parents=True, exist_ok=True)
+            teste = pasta / ".jds_cache_ok"
+            teste.write_text("ok", encoding="utf-8")
+            teste.unlink(missing_ok=True)
+            return caminho
+        except Exception:
+            continue
     return CACHE_GARIMPO_DB
 
 
-def _conectar_cache_sqlite():
-    caminho = _arquivo_cache_sqlite()
-    caminho.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(caminho), timeout=12)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS buscas (
-            termo TEXT NOT NULL,
-            pais TEXT NOT NULL,
-            json TEXT NOT NULL,
-            criado_em REAL NOT NULL,
-            PRIMARY KEY (termo, pais)
-        )
-        """
-    )
-    return conn
+def _copia_cache_lista(produtos):
+    try:
+        return json.loads(json.dumps(produtos, ensure_ascii=False))
+    except Exception:
+        return list(produtos or [])
 
 
 def _ler_cache_garimpo(termo, pais="BR"):
-    """Consulta SQLite antes da Serper. Válido por 2h, separado por termo+país."""
+    """Memória e SQLite antes da Serper. 2h, separado por termo+país."""
     termo_n = _termo_cache_norm(termo)
     pais = _normalizar_pais(pais)
     if not termo_n:
         return None
     agora = time.time()
+    with _CACHE_LOCK:
+        mem = _MEM_CACHE.get((termo_n, pais))
+        if mem and agora - float(mem.get("quando") or 0) <= CACHE_TTL_SEG:
+            return _copia_cache_lista(mem.get("produtos") or [])
+        if mem:
+            _MEM_CACHE.pop((termo_n, pais), None)
     try:
         with _CACHE_LOCK:
             conn = _conectar_cache_sqlite()
@@ -1552,7 +1567,10 @@ def _ler_cache_garimpo(termo, pais="BR"):
         if not isinstance(produtos, list) or not produtos:
             return None
         validos = [p for p in produtos if isinstance(p, dict)]
-        return validos or None
+        if validos:
+            with _CACHE_LOCK:
+                _MEM_CACHE[(termo_n, pais)] = {"quando": float(quando), "produtos": validos}
+        return _copia_cache_lista(validos) if validos else None
     except Exception as e:
         print(f"[Cache SQLite] leitura: {e}")
         return None
@@ -1565,8 +1583,11 @@ def _gravar_cache_garimpo(termo, produtos, pais="BR"):
     if not termo_n or not produtos:
         return
     agora = time.time()
+    copia = _copia_cache_lista(list(produtos))
+    with _CACHE_LOCK:
+        _MEM_CACHE[(termo_n, pais)] = {"quando": agora, "produtos": copia}
     try:
-        payload = json.dumps(list(produtos), ensure_ascii=False)
+        payload = json.dumps(copia, ensure_ascii=False)
         with _CACHE_LOCK:
             conn = _conectar_cache_sqlite()
             try:
@@ -1589,6 +1610,24 @@ def _gravar_cache_garimpo(termo, produtos, pais="BR"):
                 conn.close()
     except Exception as e:
         print(f"[Cache SQLite] gravação: {e}")
+
+
+def _conectar_cache_sqlite():
+    caminho = _arquivo_cache_sqlite()
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(caminho), timeout=12)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS buscas (
+            termo TEXT NOT NULL,
+            pais TEXT NOT NULL,
+            json TEXT NOT NULL,
+            criado_em REAL NOT NULL,
+            PRIMARY KEY (termo, pais)
+        )
+        """
+    )
+    return conn
 
 
 def _buscar_ofertas_ml_api(termo, limite=8):

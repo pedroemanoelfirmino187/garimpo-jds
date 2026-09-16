@@ -1,8 +1,8 @@
 [build]
 builder = "NIXPACKS"
 
-[deploy]
-startCommand = "uvicorn api.main:app --host 0.0.0.0 --port $PORT"
+# Cache 2h em SQLite. Se existir volume no Railway (RAILWAY_VOLUME_MOUNT_PATH),
+# o arquivo vai para esse disco; senão usa a pasta do app.
 healthcheckPath = "/health"
 healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"
