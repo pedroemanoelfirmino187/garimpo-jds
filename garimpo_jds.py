@@ -100,6 +100,93 @@ def aplicar_tag_amazon_eua(url):
     if "amazon.com.br" in (url or "").lower():
         return _carimbar_tag_amazon(url, ID_AMAZON)
     return _carimbar_tag_amazon(url, ID_AMAZON_US)
+
+
+def aplicar_afiliado_por_dominio(url):
+    """Link final da loja + ID JDS do Brasil ou dos EUA, conforme o domínio."""
+    href = _desempacotar_link_google(url) or (url or "").strip()
+    if not href.startswith("http"):
+        return href
+    plat = _plataforma_loja(href) or _detectar_plataforma(href)
+    if plat == "amazon":
+        if _host_amazon_eua(href):
+            return aplicar_tag_amazon_eua(href)
+        return _carimbar_tag_amazon(href, ID_AMAZON)
+    return _aplicar_afiliado_google(href, plat)
+
+
+def _titulo_limpo_oferta(titulo):
+    t = re.sub(r"\s+", " ", (titulo or "").strip())
+    t = re.sub(
+        r"\s*[-|]\s*(Shopee Brasil|Shopee|Amazon\.com\.br|Amazon\.com|Amazon|Mercado Livre|eBay)\s*$",
+        "",
+        t,
+        flags=re.I,
+    )
+    return t[:180].strip()
+
+
+def _preco_numerico_limpo(valor, pais="BR"):
+    if isinstance(valor, (int, float)):
+        n = float(valor)
+    else:
+        n = _preco_para_numero(valor, pais=pais)
+    if n != n or n < 0:
+        return 0.0
+    return round(n, 2)
+
+
+def serializar_oferta_app(item, pais="BR"):
+    """JSON limpo do app móvel: titulo, preco_formatado, preco_numerico, loja, link_afiliado, imagem."""
+    p = item if isinstance(item, dict) else {}
+    pais = _normalizar_pais(p.get("pais") or pais)
+    titulo = _titulo_limpo_oferta(p.get("titulo") or "")
+    bruto = p.get("preco_num")
+    if bruto in (None, "", 0, 0.0):
+        bruto = p.get("preco_numerico") or p.get("preco") or p.get("price")
+    numero = _preco_numerico_limpo(bruto, pais=pais)
+    if numero >= 999990:
+        texto = "Ver preço na loja"
+    else:
+        texto = _formatar_preco(numero, pais=pais)
+    href = aplicar_afiliado_por_dominio(
+        p.get("url") or p.get("link") or p.get("link_afiliado") or ""
+    )
+    imagem = (p.get("foto") or p.get("imagem") or p.get("image") or "").strip()
+    if imagem.startswith("//"):
+        imagem = "https:" + imagem
+    loja = (p.get("loja") or _nome_loja(p.get("plataforma")) or "").strip()
+    return {
+        "titulo": titulo,
+        "preco_formatado": texto,
+        "preco_numerico": numero,
+        "loja": loja,
+        "link_afiliado": href,
+        "imagem": imagem,
+        "price": texto,
+        "preco": texto,
+        "preco_num": numero,
+        "url": href,
+        "link": href,
+        "foto": imagem,
+        "plataforma": p.get("plataforma") or _plataforma_loja(href),
+        "pais": pais,
+        "selo": p.get("selo"),
+        "campeao": bool(p.get("campeao")),
+        "fonte": p.get("fonte"),
+        "full": bool(p.get("full")),
+        "loja_oficial": p.get("loja_oficial", True),
+        "termo_busca": p.get("termo_busca") or "",
+    }
+
+
+def serializar_lista_app(lista, pais="BR"):
+    pais = _normalizar_pais(pais)
+    saida = [serializar_oferta_app(p, pais=pais) for p in (lista or []) if isinstance(p, dict)]
+    saida.sort(key=lambda x: x.get("preco_numerico") or 9e9)
+    return saida
+
+
 ASIN_DUALSENSE = "B0CQKLS4RP"
 CUPOM_JDS = "JDS10"
 CACHE_GARIMPO = Path(__file__).resolve().parent / "cache_garimpo.json"
@@ -1403,7 +1490,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v14:" + pais + ":" + re.sub(r"\s+", " ", (termo or "").strip().lower())
+    return "v15:" + pais + ":" + re.sub(r"\s+", " ", (termo or "").strip().lower())
 
 
 def _ler_cache_garimpo(termo, pais="BR"):
@@ -1711,8 +1798,10 @@ def _primeira_url_loja(texto):
     blob = urllib.parse.unquote(blob)
     padroes = (
         r"https?://(?:www\.)?amazon\.com\.br[^\"'\s<>]*?/(?:dp|gp/product)/[A-Z0-9]{10}",
+        r"https?://(?:www\.)?amazon\.com[^\"'\s<>]*?/(?:dp|gp/product)/[A-Z0-9]{10}",
         r"https?://(?:www\.|produto\.)?mercado(?:livre|libre)\.com\.br[^\"'\s<>]+",
         r"https?://(?:s\.)?shopee\.com\.br[^\"'\s<>]+",
+        r"https?://(?:www\.)?ebay\.com[^\"'\s<>]*?/itm/[^\"'\s<>]+",
     )
     for padrao in padroes:
         achado = re.search(padrao, blob, re.I)
@@ -1952,10 +2041,12 @@ def _preco_item_serper(it, pais="BR"):
 def _href_item_serper(it):
     if not isinstance(it, dict):
         return ""
-    for k in ("link", "productLink", "merchantLink", "url"):
+    for k in ("productLink", "merchantLink", "link", "url"):
         h = _desempacotar_link_google((it.get(k) or "").strip())
-        if h:
-            return h
+        if h and _plataforma_loja(h):
+            return h.split("#")[0]
+        if h and h.startswith("http") and "google." not in h.lower():
+            return h.split("#")[0]
     return _primeira_url_loja(json.dumps(it, ensure_ascii=False))
 
 
@@ -2566,17 +2657,22 @@ def _ofertas_fallback_lojas(termo, pais="BR"):
 
 
 def _carimbar_lista_afiliado(lista, pais="BR"):
-    """Garante afiliado JDS em todo link entregue ao usuário."""
+    """Garante afiliado JDS em todo link: direto da oferta (Google) ou busca da loja (fallback)."""
     pais = _normalizar_pais(pais)
     for p in lista or []:
         p_pais = _normalizar_pais(p.get("pais") or pais)
         p["pais"] = p_pais
-        if p.get("plataforma") == "amazon" and (
-            p_pais == "US" or _host_amazon_eua(p.get("url") or "")
-        ):
-            p["url"] = aplicar_tag_amazon_eua(p.get("url") or "")
+        url = (p.get("url") or "").strip()
+        plat = p.get("plataforma") or _plataforma_loja(url)
+        fonte = (p.get("fonte") or "").lower()
+        if fonte in {"google", "scrape", "oficial"} and url.startswith("http"):
+            p["url"] = aplicar_afiliado_por_dominio(url)
+        elif plat == "amazon" and (p_pais == "US" or _host_amazon_eua(url)):
+            p["url"] = aplicar_tag_amazon_eua(url)
         else:
             p["url"] = _link_compra_do_card(p)
+        app = serializar_oferta_app(p, pais=p_pais)
+        p.update(app)
     return lista
 
 
@@ -3794,6 +3890,51 @@ def executar_testes_unitarios():
         any(f"tag={ID_AMAZON_US}" in (p.get("url") or "") for p in us_mix if p.get("plataforma") == "amazon"),
         "Amazon US carimba tracking ID",
     )
+    app_json = serializar_oferta_app({
+        "titulo": "DualSense  - Amazon.com.br",
+        "preco": "R$ 1.234,50",
+        "preco_num": 1234.5,
+        "url": "https://www.google.com/url?url=https://www.amazon.com.br/dp/B0CQKLS4RP",
+        "foto": "https://m.media-amazon.com/images/I/dual.jpg",
+        "plataforma": "amazon",
+        "loja": "Amazon",
+        "pais": "BR",
+        "fonte": "google",
+    }, pais="BR")
+    chaves_app = {"titulo", "preco_formatado", "preco_numerico", "loja", "link_afiliado", "imagem"}
+    checar(chaves_app <= set(app_json), "JSON do app tem as 6 chaves padronizadas")
+    checar(app_json["titulo"] == "DualSense", "título limpo sem sufixo da loja")
+    checar(isinstance(app_json["preco_numerico"], float) and abs(app_json["preco_numerico"] - 1234.5) < 0.01,
+           "preco_numerico é float para o app ordenar")
+    checar(app_json["preco_formatado"].startswith("R$"), "preco_formatado amigável em real")
+    checar(
+        "/dp/B0CQKLS4RP" in app_json["link_afiliado"]
+        and f"tag={ID_AMAZON}" in app_json["link_afiliado"]
+        and "google." not in app_json["link_afiliado"],
+        "link do Google vira oferta final com afiliado BR",
+    )
+    us_json = serializar_oferta_app({
+        "titulo": "DualSense",
+        "preco_num": 69.99,
+        "url": "https://www.amazon.com/dp/B0CQKLS4RP",
+        "foto": "https://m.media-amazon.com/images/I/dual.jpg",
+        "plataforma": "amazon",
+        "pais": "US",
+        "fonte": "google",
+    }, pais="US")
+    checar(
+        f"tag={ID_AMAZON_US}" in us_json["link_afiliado"]
+        and "jdseconomiz0e-20" not in us_json["link_afiliado"],
+        "domínio amazon.com recebe o ID dos EUA",
+    )
+    lista_ord = serializar_lista_app([
+        {"titulo": "B", "preco_num": 80, "url": "https://www.amazon.com.br/dp/B0BBBBBBBB",
+         "foto": "https://m.media-amazon.com/images/I/b.jpg", "plataforma": "amazon", "fonte": "google"},
+        {"titulo": "A", "preco_num": 40, "url": "https://www.amazon.com.br/dp/B0AAAAAAAA",
+         "foto": "https://m.media-amazon.com/images/I/a.jpg", "plataforma": "amazon", "fonte": "google"},
+    ], pais="BR")
+    checar(lista_ord[0]["titulo"] == "A" and lista_ord[0]["preco_numerico"] == 40.0,
+           "lista do app ordena pelo preco_numerico")
     checar(not _preco_plausivel(
         "controle ps5", 292.78,
         "PlayStation DualSense Controle sem fio",

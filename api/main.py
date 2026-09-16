@@ -27,12 +27,12 @@ from garimpo_jds import (  # noqa: E402
     ID_AMAZON_US,
     ID_MERCADO_LIVRE,
     ID_SHOPEE,
-    _carimbar_lista_afiliado,
     _chave_cache,
     _chaves_env,
     _normalizar_pais,
     buscar_ofertas_por_pais,
     buscar_ofertas_serper_shopping,
+    serializar_lista_app,
 )
 
 app = FastAPI(
@@ -77,7 +77,7 @@ def _autorizar_app(
 
 def _resposta_ofertas(termo, ofertas, pais="BR"):
     pais = _normalizar_pais(pais)
-    lista = _carimbar_lista_afiliado(ofertas or [], pais=pais)
+    lista = serializar_lista_app(ofertas or [], pais=pais)
     campeao = lista[0] if lista else None
     return {
         "termo": termo,
@@ -85,10 +85,12 @@ def _resposta_ofertas(termo, ofertas, pais="BR"):
         "total": len(lista),
         "cache": _chave_cache(termo, pais=pais),
         "menor_preco": None if not campeao else {
-            "preco": campeao.get("preco"),
-            "loja": campeao.get("loja"),
             "titulo": campeao.get("titulo"),
-            "url": campeao.get("url"),
+            "preco_formatado": campeao.get("preco_formatado"),
+            "preco_numerico": campeao.get("preco_numerico"),
+            "loja": campeao.get("loja"),
+            "link_afiliado": campeao.get("link_afiliado"),
+            "imagem": campeao.get("imagem"),
         },
         "ofertas": lista,
     }
