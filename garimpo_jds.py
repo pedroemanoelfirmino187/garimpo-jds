@@ -1164,6 +1164,8 @@ def _titulo_shopping_ok(termo, titulo):
     """Shopping: pelo menos um token do termo; não exige o título copiar a busca inteira."""
     if _titulo_e_acessorio_imediato(titulo) or _parece_artigo_nao_produto(titulo):
         return False
+    if _parece_acessorio_barato(titulo, termo):
+        return False
     if _titulo_usado(titulo):
         return False
     toks = _tokens_busca(termo)
@@ -1894,18 +1896,16 @@ def _obter_preco_base_categoria(termo):
 
 
 def _rank_oferta_real(p):
-    """Anúncio /dp/ /p/ primeiro. Lista de busca não ganha com preço de vitrine."""
-    plat = (p or {}).get("plataforma")
+    """Menor preço entre anúncios reais. Lista de busca da loja fica por último."""
     try:
         preco = float((p or {}).get("preco_num") or 9e9)
     except (TypeError, ValueError):
         preco = 9e9
     fonte = ((p or {}).get("fonte") or "").lower()
-    if fonte == "busca_loja":
+    url = (p or {}).get("url") or (p or {}).get("link") or ""
+    if fonte == "busca_loja" or _url_e_busca_loja(url):
         return (2, preco)
-    if _url_anuncio_exato((p or {}).get("url") or (p or {}).get("link"), plat):
-        return (0, preco)
-    return (1, preco)
+    return (0, preco)
 
 
 def _ordenar_entrega_menor_preco(lista_produtos):
@@ -1948,7 +1948,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v28:" + pais + ":" + _termo_cache_norm(termo)
+    return "v29:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2836,6 +2836,47 @@ def isolar_produto_mais_barato(ofertas, pais="BR"):
     return carimbada[0] if carimbada else lista[0]
 
 
+def _post_serper_shopping(q, pais="BR", num=40):
+    """Uma chamada Shopping. q já vem sem site:."""
+    chave = _chave_serper()
+    loc = _serper_locale(pais)
+    if not chave or requests is None or not (q or "").strip():
+        return 0, [], loc, "sem_chave"
+    try:
+        resp = requests.post(
+            "https://google.serper.dev/shopping",
+            headers={
+                "X-API-KEY": chave,
+                "Content-Type": "application/json",
+            },
+            json={
+                "q": q.strip(),
+                "gl": loc["gl"],
+                "hl": loc["hl"],
+                "num": min(int(num or 20), 40),
+            },
+            timeout=25,
+        )
+        http = resp.status_code
+        if http >= 400:
+            return http, [], loc, (resp.text or "")[:180]
+        dados = resp.json() if resp.text else {}
+    except Exception as e:
+        return 0, [], loc, str(e)[:180]
+    if not isinstance(dados, dict):
+        return http, [], loc, ""
+    cru = [it for it in (dados.get("shopping") or []) if isinstance(it, dict)]
+    return http, cru, loc, ""
+
+
+def _consultas_serper_fallback(termo, pais="BR"):
+    """Se a busca pura só trouxer acessório, tenta de novo com o nome da loja (sem site:)."""
+    q = _consulta_serper_shopping(termo)
+    if _normalizar_pais(pais) == "US":
+        return [f"{q} amazon", f"{q} ebay"]
+    return [f"{q} amazon", f"{q} mercado livre", f"{q} shopee"]
+
+
 def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR"):
     """
     Cache → POST Serper Shopping → lojas do país → preço float → menor preço no topo.
@@ -2853,55 +2894,56 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
             if lista:
                 print(f"[Serper] cache {_chave_cache(t, pais=pais)}")
                 return lista
-    chave = _chave_serper()
-    loc = _serper_locale(pais)
     q = _consulta_serper_shopping(t)
-    if not chave or requests is None:
+    if not q:
+        return []
+    http, cru, loc, erro = _post_serper_shopping(q, pais=pais, num=limite)
+    if erro == "sem_chave":
         _ULTIMO_DIAG_SERPER.clear()
         _ULTIMO_DIAG_SERPER.update({"q": q, "http": 0, "shopping": 0, "erro": "sem_chave"})
         return []
-    if not q:
-        return []
-    try:
-        resp = requests.post(
-            "https://google.serper.dev/shopping",
-            headers={
-                "X-API-KEY": chave,
-                "Content-Type": "application/json",
-            },
-            json={"q": q, "gl": loc["gl"], "hl": loc["hl"], "num": min(int(limite or 20), 40)},
-            timeout=25,
-        )
-        http = resp.status_code
-        if http >= 400:
-            trecho = (resp.text or "")[:180]
-            print(f"[Serper] HTTP {http}")
-            _ULTIMO_DIAG_SERPER.clear()
-            _ULTIMO_DIAG_SERPER.update({
-                "q": q, "gl": loc["gl"], "hl": loc["hl"], "http": http,
-                "shopping": 0, "sources": [], "apos_source": 0, "ofertas": 0,
-                "erro": trecho,
-            })
-            return []
-        dados = resp.json() if resp.text else {}
-    except Exception as e:
-        print(f"[Serper] {e}")
+    if http >= 400:
+        print(f"[Serper] HTTP {http}")
         _ULTIMO_DIAG_SERPER.clear()
-        _ULTIMO_DIAG_SERPER.update({"q": q, "http": 0, "shopping": 0, "erro": str(e)[:180]})
+        _ULTIMO_DIAG_SERPER.update({
+            "q": q, "gl": loc["gl"], "hl": loc["hl"], "http": http,
+            "shopping": 0, "sources": [], "apos_source": 0, "ofertas": 0,
+            "erro": erro,
+        })
         return []
-    if not isinstance(dados, dict):
+    if erro and not cru:
+        print(f"[Serper] {erro}")
+        _ULTIMO_DIAG_SERPER.clear()
+        _ULTIMO_DIAG_SERPER.update({"q": q, "http": http, "shopping": 0, "erro": erro})
         return []
-    cru = [it for it in (dados.get("shopping") or []) if isinstance(it, dict)]
     sources = [str(it.get("source") or "") for it in cru][:15]
     shopping = [
         it for it in cru
         if _source_loja_oficial(str(it.get("source") or it.get("domain") or ""), pais=pais)
     ]
     ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite, pais=pais)
+    qs_usadas = [q]
+    if not ofertas:
+        for q2 in _consultas_serper_fallback(t, pais=pais):
+            if q2 == q:
+                continue
+            http2, cru2, _, erro2 = _post_serper_shopping(q2, pais=pais, num=limite)
+            if erro2 or http2 >= 400 or not cru2:
+                continue
+            qs_usadas.append(q2)
+            cru.extend(cru2)
+            extra = [
+                it for it in cru2
+                if _source_loja_oficial(str(it.get("source") or it.get("domain") or ""), pais=pais)
+            ]
+            shopping.extend(extra)
+            ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite, pais=pais)
+            if ofertas:
+                break
     ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
     _ULTIMO_DIAG_SERPER.clear()
     _ULTIMO_DIAG_SERPER.update({
-        "q": q, "gl": loc["gl"], "hl": loc["hl"], "http": http,
+        "q": q, "qs": qs_usadas, "gl": loc["gl"], "hl": loc["hl"], "http": http,
         "shopping": len(cru), "sources": sources,
         "apos_source": len(shopping), "ofertas": len(ofertas),
         "quedas": dict(_ULTIMO_QUEDAS_SERPER),
@@ -4663,6 +4705,38 @@ def executar_testes_unitarios():
         and "ibp=oshop" in (oshop[0].get("url") or ""),
         "link Google oshop da Amazon entra com o preço",
     )
+    checar(
+        not _titulo_shopping_ok(
+            "redmi note 13",
+            "Tela Display Compatível Para Note 13 4G OLED",
+        )
+        and not _titulo_shopping_ok(
+            "redmi note 13",
+            "Kit Capa Anti Impacto e Película De Vidro 3D",
+        ),
+        "peça e capa do Redmi não viram o celular",
+    )
+    mais_barato_oshop = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
+        {
+            "title": "Gamrombo Controle LED PS5",
+            "source": "Amazon.com.br - Seller",
+            "price": "R$ 330,00",
+            "link": "https://www.google.com/search?ibp=oshop&q=controle+ps5&prds=catalogid:1",
+            "imageUrl": "https://encrypted-tbn0.gstatic.com/shopping?q=tbn:barato",
+        },
+        {
+            "title": "Gamrombo Controle LED PS5",
+            "source": "Amazon.com.br - Retail",
+            "price": "R$ 370,70",
+            "link": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+            "imageUrl": "https://m.media-amazon.com/images/I/dual.jpg",
+        },
+    ]))
+    checar(
+        mais_barato_oshop
+        and abs(float(mais_barato_oshop[0].get("preco_num") or 0) - 330.00) < 0.05,
+        "o card mais barato da Amazon vence o /dp/ mais caro",
+    )
     busca_vs_anuncio = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
         {
             "title": "Controle DualSense PS5 Sony",
@@ -4877,6 +4951,11 @@ def executar_testes_unitarios():
         and _consulta_serper_shopping("bicicleta") == "bicicleta"
         and "site:" not in _consulta_serper_shopping("bicicleta site:shopee.com.br"),
         "payload q da Serper é só o nome do produto",
+    )
+    checar(
+        all("site:" not in q for q in _consultas_serper_fallback("redmi note 13"))
+        and "amazon" in _consultas_serper_fallback("redmi note 13")[0],
+        "fallback sem site: tenta o nome da loja no q",
     )
     checar(
         _completar_lojas_serper("garrafa de café", []) == [],
