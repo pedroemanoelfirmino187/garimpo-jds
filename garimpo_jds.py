@@ -968,6 +968,10 @@ def _oferta_foto_preco_do_mesmo_item(item):
         return False
     if _url_anuncio_exato(url, plat):
         return True
+    if _url_e_busca_loja(url):
+        return False
+    if _anuncio_veio_do_google(item) and str(url).startswith("http"):
+        return True
     if _foto_e_generica(foto):
         return False
     if not _eh_link_produto(url, plat):
@@ -995,6 +999,8 @@ def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NO
     url = _url_canonica_loja(url, plat, pais=pais)
     if _url_anuncio_exato(url, plat) or (_eh_pagina_compra(url, plat) and "orderid_price" not in (url or "").lower() and "/s?" not in (url or "").lower() and "shopee.com.br/search" not in (url or "").lower()):
         url_final = _aplicar_afiliado_google(url, plat, pais=pais)
+    elif str(url or "").startswith("http") and not _url_e_busca_loja(url):
+        url_final = url
     elif plat == "shopee":
         url_final = _link_busca_shopee(titulo)
     elif plat == "amazon":
@@ -1146,6 +1152,26 @@ def _titulo_e_acessorio_imediato(titulo):
         if re.search(rf"(?<![a-z0-9]){re.escape(palavra)}(?![a-z0-9])", t):
             return True
     return False
+
+
+def _titulo_shopping_ok(termo, titulo):
+    """Shopping: pelo menos um token do termo; não exige o título copiar a busca inteira."""
+    if _titulo_e_acessorio_imediato(titulo) or _parece_artigo_nao_produto(titulo):
+        return False
+    if _titulo_usado(titulo):
+        return False
+    toks = _tokens_busca(termo)
+    if not toks:
+        return True
+    t = _sem_acento(titulo or "")
+    if not t:
+        return False
+    if "xbox" in toks and "xbox" not in t and any(x in t for x in ("dualsense", "ps5", "playstation")):
+        return False
+    if any(w in toks for w in ("ps5", "playstation", "dualsense")) and "xbox" not in toks:
+        if "xbox" in t and "dualsense" not in t and "ps5" not in t:
+            return False
+    return any(_token_no_titulo(tok, t) for tok in toks)
 
 
 def _termo_contido_no_titulo(termo, titulo):
@@ -1916,7 +1942,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v24:" + pais + ":" + _termo_cache_norm(termo)
+    return "v25:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2361,6 +2387,8 @@ def _desempacotar_link_google(href):
     if not h.startswith("http"):
         return ""
     if "google." in h.lower() and not _plataforma_loja(h):
+        if "/shopping/" in h.lower():
+            return h.split("#")[0]
         return ""
     return h.split("#")[0]
 
@@ -2410,7 +2438,10 @@ def _item_google(termo, titulo, preco, href, foto, plat, origem="", pais="BR"):
     href = _url_canonica_loja(href, plat, pais=pais)
     if _parece_artigo_nao_produto(titulo) or _parece_url_conteudo(href):
         return None
-    if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo, pais=pais):
+    if origem == "serper":
+        if not _titulo_shopping_ok(termo, titulo) or not _preco_plausivel(termo, preco, titulo, pais=pais):
+            return None
+    elif not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo, pais=pais):
         return None
     if _url_e_busca_loja(href):
         return None
@@ -2713,6 +2744,8 @@ def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
         if not href or _url_e_busca_loja(href):
             bruto = str(bloco.get("link") or it.get("productLink") or it.get("merchantLink") or "")
             href = _desempacotar_link_google(bruto) or bruto.strip()
+            if not href.startswith("http") and bruto.startswith("http") and not _url_e_busca_loja(bruto):
+                href = bruto.split("#")[0]
             if _url_e_busca_loja(href):
                 href = ""
         plat_src = _loja_do_texto(src)
@@ -2724,7 +2757,7 @@ def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
             continue
         if not href.startswith("http"):
             continue
-        if not _titulo_relevante(termo, titulo) and not _termo_contido_no_titulo(termo, titulo):
+        if not _titulo_shopping_ok(termo, titulo):
             continue
         preco = _preco_item_serper(it, pais=pais)
         foto = bloco["imageUrl"]
@@ -4527,6 +4560,29 @@ def executar_testes_unitarios():
     checar(
         not any(p.get("plataforma") == "shopee" for p in misturado_serper),
         "capa/capinha/suporte/cabo da Shopee é descartado",
+    )
+    gshop = _ofertas_de_itens_serper("garrafa de cafe", [
+        {
+            "title": "Garrafa Térmica Inox 500ml",
+            "source": "Amazon.com.br",
+            "price": "R$ 89,90",
+            "link": "https://www.google.com/shopping/product/123456?gl=br",
+            "imageUrl": "https://encrypted-tbn0.gstatic.com/shopping?q=tbn:teste",
+        },
+        {
+            "title": "Garrafa Térmica 1L",
+            "source": "Magazine Luiza",
+            "price": "R$ 59,90",
+            "link": "https://www.google.com/shopping/product/999?gl=br",
+            "imageUrl": "https://encrypted-tbn0.gstatic.com/shopping?q=tbn:mag",
+        },
+    ])
+    checar(
+        gshop
+        and gshop[0].get("plataforma") == "amazon"
+        and abs(float(gshop[0].get("preco_num") or 0) - 89.90) < 0.05
+        and "shopping/product" in (gshop[0].get("url") or ""),
+        "Shopping Google com source Amazon entra; Magazine Luiza sai",
     )
     busca_vs_anuncio = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
         {
