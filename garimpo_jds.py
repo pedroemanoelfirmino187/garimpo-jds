@@ -858,7 +858,7 @@ def _eh_pagina_compra(url, plat):
 
 def _asin_amazon(url):
     achado = re.search(
-        r"(?:/dp/|/gp/product/|/gp/aw/d/|/product/)([A-Z0-9]{10})",
+        r"(?:/dp/|/gp/product/|/gp/aw/d/|/product/|/images/P/)([A-Z0-9]{10})",
         url or "",
         re.I,
     )
@@ -1908,7 +1908,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v22:" + pais + ":" + _termo_cache_norm(termo)
+    return "v23:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2538,7 +2538,7 @@ def _serper_post(caminho, corpo):
 
 
 def _preco_item_serper(it, pais="BR"):
-    """Preço só deste bloco: string price (R$ 1.799,00 → 1799.00), senão extracted_price."""
+    """Preço só deste bloco: price, extracted_price, offers, ou R$ no snippet do mesmo item."""
     if not isinstance(it, dict):
         return 0.0
     n = _limpar_preco_serper(it.get("price"), pais=pais)
@@ -2551,6 +2551,22 @@ def _preco_item_serper(it, pais="BR"):
                 return n
         except (TypeError, ValueError):
             pass
+    for offer in it.get("offers") or []:
+        if not isinstance(offer, dict):
+            continue
+        n = _limpar_preco_serper(offer.get("price"), pais=pais)
+        if n > 0:
+            return n
+    snippet = str(it.get("snippet") or "")
+    us = _normalizar_pais(pais) == "US"
+    if us:
+        achado = re.search(r"\$\s*[\d,]+(?:\.\d{2})?", snippet)
+    else:
+        achado = re.search(r"R\$\s*[\d.]+,\d{2}", snippet)
+    if achado:
+        n = _limpar_preco_serper(achado.group(0), pais=pais)
+        if n > 0:
+            return n
     return 0.0
 
 
@@ -2611,13 +2627,22 @@ def _href_item_serper(it):
             continue
         vistos.add(h)
         resolvidos.append(h)
-    if not resolvidos:
-        return ""
     resolvidos.sort(
         key=lambda h: (0 if _url_anuncio_exato(h, _plataforma_loja(h)) else 1)
     )
-    melhor = resolvidos[0]
-    return melhor if _url_anuncio_exato(melhor, _plataforma_loja(melhor)) else ""
+    melhor = resolvidos[0] if resolvidos else ""
+    if melhor and _url_anuncio_exato(melhor, _plataforma_loja(melhor)):
+        return melhor
+    if plat_src == "amazon" or _plataforma_loja(melhor) == "amazon":
+        for campo in (it.get("imageUrl"), it.get("image"), it.get("link"), it.get("productLink")):
+            asin = _asin_amazon(str(campo or ""))
+            if not asin:
+                continue
+            bruto = str(campo or "").lower()
+            if "amazon.com/" in bruto and "amazon.com.br" not in bruto:
+                return f"https://www.amazon.com/dp/{asin}"
+            return f"https://www.amazon.com.br/dp/{asin}"
+    return ""
 
 
 def _bloco_serper_isolado(it):
@@ -2670,8 +2695,6 @@ def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
         titulo = bloco["title"]
         if _titulo_e_acessorio_imediato(titulo):
             continue
-        if not _termo_contido_no_titulo(termo, titulo):
-            continue
         if not _item_serper_loja_ok(it, pais=pais):
             continue
         href = _href_item_serper(it)
@@ -2682,7 +2705,9 @@ def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
         plat = plat_link or plat_src
         if not plat or not _url_anuncio_exato(href, plat):
             continue
-        preco = _preco_item_serper(bloco, pais=pais)
+        if not _titulo_relevante(termo, titulo) and not _termo_contido_no_titulo(termo, titulo):
+            continue
+        preco = _preco_item_serper(it, pais=pais)
         foto = bloco["imageUrl"]
         item = _item_google(termo, titulo, preco, href, foto, plat, origem="serper", pais=pais)
         if not item or not _url_anuncio_exato(item.get("url"), plat):
@@ -2773,8 +2798,84 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
     return ofertas
 
 
+def _primeira_url_organica_loja(termo, organicos, plat, pais="BR"):
+    for it in organicos or []:
+        if not isinstance(it, dict):
+            continue
+        titulo = str(it.get("title") or "")
+        if _titulo_e_acessorio_imediato(titulo):
+            continue
+        if not _titulo_relevante(termo, titulo) and not _termo_contido_no_titulo(termo, titulo):
+            continue
+        href = _href_item_serper(it)
+        if _plataforma_loja(href) == plat and _url_anuncio_exato(href, plat):
+            if pais == "US" and plat == "amazon" and not _host_amazon_eua(href):
+                continue
+            return href, titulo, str(it.get("imageUrl") or it.get("image") or "")
+    return "", "", ""
+
+
+def _rascunho_preco_shopping_loja(termo, itens, plat, pais="BR"):
+    melhor = None
+    for it in itens or []:
+        if not isinstance(it, dict):
+            continue
+        titulo = str(it.get("title") or "")
+        if _titulo_e_acessorio_imediato(titulo):
+            continue
+        if not _item_serper_loja_ok(it, pais=pais):
+            continue
+        loja = _loja_do_texto(str(it.get("source") or it.get("domain") or ""))
+        if loja and loja != plat:
+            continue
+        if not loja:
+            loja = _plataforma_loja(_href_item_serper(it))
+        if loja != plat:
+            continue
+        if not _titulo_relevante(termo, titulo) and not _termo_contido_no_titulo(termo, titulo):
+            continue
+        preco = _preco_item_serper(it, pais=pais)
+        if preco <= 0:
+            continue
+        cand = {
+            "preco": preco,
+            "titulo": titulo,
+            "foto": str(it.get("imageUrl") or it.get("image") or ""),
+        }
+        if melhor is None or preco < melhor["preco"]:
+            melhor = cand
+    return melhor
+
+
+def _juntar_preco_shopping_url_anuncio(termo, shopping, organicos, plat, pais="BR"):
+    """Preço do card shopping da loja + /dp/ /p/ da busca orgânica da mesma loja."""
+    rascunho = _rascunho_preco_shopping_loja(termo, shopping, plat, pais=pais)
+    href, titulo_org, foto_org = _primeira_url_organica_loja(termo, organicos, plat, pais=pais)
+    if not href:
+        return None
+    if rascunho:
+        return _item_google(
+            termo, rascunho["titulo"], rascunho["preco"], href,
+            rascunho["foto"] or foto_org, plat, origem="serper", pais=pais,
+        )
+    preco = 0.0
+    titulo = titulo_org
+    foto = foto_org
+    for it in organicos or []:
+        if not isinstance(it, dict):
+            continue
+        if _href_item_serper(it) == href:
+            preco = _preco_item_serper(it, pais=pais)
+            titulo = str(it.get("title") or titulo)
+            foto = str(it.get("imageUrl") or it.get("image") or foto)
+            break
+    if preco <= 0:
+        return None
+    return _item_google(termo, titulo, preco, href, foto, plat, origem="serper", pais=pais)
+
+
 def _completar_lojas_serper(termo, ofertas, limite=8, pais="BR"):
-    """Uma busca Serper por loja que faltar."""
+    """Uma busca Serper por loja que faltar: shopping + anúncio orgânico da mesma loja."""
     pais = _normalizar_pais(pais)
     loc = _serper_locale(pais)
     if pais == "US":
@@ -2798,13 +2899,14 @@ def _completar_lojas_serper(termo, ofertas, limite=8, pais="BR"):
             k in t.lower() for k in ("ps5", "dualsense", "playstation")
         ):
             consulta = f"DualSense {ASIN_DUALSENSE} {t} {site}"
-        dados = _serper_post("/shopping", {
+        dados_shop = _serper_post("/shopping", {
             "q": consulta,
             "gl": loc["gl"],
             "hl": loc["hl"],
             "num": 10,
         })
-        for item in _ofertas_de_itens_serper(t, dados.get("shopping") or [], limite, pais=pais):
+        shop_raw = dados_shop.get("shopping") or []
+        for item in _ofertas_de_itens_serper(t, shop_raw, limite, pais=pais):
             if item.get("plataforma") == plat:
                 ofertas = _guardar_melhor_loja(ofertas, item)
         tem_exato = any(
@@ -2813,15 +2915,25 @@ def _completar_lojas_serper(termo, ofertas, limite=8, pais="BR"):
         )
         if tem_exato:
             continue
-        dados = _serper_post("/search", {
+        dados_org = _serper_post("/search", {
             "q": consulta,
             "gl": loc["gl"],
             "hl": loc["hl"],
             "num": 8,
         })
-        for item in _ofertas_de_itens_serper(t, dados.get("organic") or [], limite, pais=pais):
+        org_raw = dados_org.get("organic") or []
+        for item in _ofertas_de_itens_serper(t, org_raw, limite, pais=pais):
             if item.get("plataforma") == plat:
                 ofertas = _guardar_melhor_loja(ofertas, item)
+        tem_exato = any(
+            p.get("plataforma") == plat and _url_anuncio_exato(p.get("url"), plat)
+            for p in ofertas
+        )
+        if tem_exato:
+            continue
+        juntado = _juntar_preco_shopping_url_anuncio(t, shop_raw, org_raw, plat, pais=pais)
+        if juntado and juntado.get("plataforma") == plat:
+            ofertas = _guardar_melhor_loja(ofertas, juntado)
     return ofertas
 
 
@@ -4515,6 +4627,44 @@ def executar_testes_unitarios():
         and "keyword=" not in ver_alt
         and "price-asc-rank" not in ver_alt,
         "Ver Oferta abre o anúncio, não a busca da loja",
+    )
+    organico_preco = _ofertas_de_itens_serper("controle ps5", [{
+        "title": "PlayStation DualSense Controle sem fio PS5",
+        "source": "Amazon.com.br",
+        "link": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+        "snippet": "Em estoque. R$ 404,27. Entrega Amazon.",
+        "imageUrl": "https://m.media-amazon.com/images/I/dual.jpg",
+    }])
+    checar(
+        organico_preco
+        and abs(float(organico_preco[0].get("preco_num") or 0) - 404.27) < 0.05
+        and "/dp/B0CQKLS4RP" in (organico_preco[0].get("url") or ""),
+        "organic com R$ no snippet vira oferta com /dp/",
+    )
+    juntado = _juntar_preco_shopping_url_anuncio(
+        "controle ps5",
+        [{
+            "title": "PlayStation DualSense Controle sem fio PS5",
+            "source": "Amazon.com.br",
+            "price": "R$ 399,90",
+            "link": "https://www.amazon.com.br/s?k=controle+ps5&s=price-asc-rank",
+            "imageUrl": "https://m.media-amazon.com/images/I/dual.jpg",
+        }],
+        [{
+            "title": "PlayStation DualSense Controle sem fio PS5 Sony",
+            "source": "Amazon.com.br",
+            "link": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+            "snippet": "Página do produto DualSense.",
+        }],
+        "amazon",
+        pais="BR",
+    )
+    checar(
+        juntado
+        and "/dp/B0CQKLS4RP" in (juntado.get("url") or "")
+        and abs(float(juntado.get("preco_num") or 0) - 399.90) < 0.05
+        and "/s?" not in (juntado.get("url") or ""),
+        "preço do shopping + /dp/ orgânico da mesma loja",
     )
     checar(_source_loja_oficial("Amazon.com.br") and _source_loja_oficial("MERCADO LIVRE"),
            "filtro source aceita Amazon e Mercado Livre")
