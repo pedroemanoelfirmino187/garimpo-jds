@@ -305,9 +305,28 @@ def gerar_link_afiliado(url_original, plataforma):
         return url_original
 
 
+def _limpar_preco_serper(texto):
+    """R$ 1.799,00 → 1799.00: tira R$, espaço, pontos e troca vírgula por ponto."""
+    if texto is None:
+        return 0.0
+    if isinstance(texto, (int, float)):
+        n = float(texto)
+        return n if n > 0 else 0.0
+    s = str(texto).replace("R$", "").replace("r$", "").replace("$", "")
+    s = s.replace(" ", "").replace(".", "").replace(",", ".")
+    s = re.sub(r"[^\d.]", "", s)
+    if not s or s == ".":
+        return 0.0
+    try:
+        n = float(s)
+        return n if n > 0 else 0.0
+    except ValueError:
+        return 0.0
+
+
 def _preco_serper_para_float(texto):
     """Converte 'R$ 1.799,00' em 1799.00 — tira R$, milhar e vírgula."""
-    return _preco_para_numero(texto)
+    return _limpar_preco_serper(texto)
 
 
 def _source_loja_oficial(source, pais="BR"):
@@ -2162,7 +2181,7 @@ def _preco_item_serper(it, pais="BR"):
                 return n
         except (TypeError, ValueError):
             pass
-    return _preco_para_numero(it.get("price") or it.get("snippet") or "", pais=pais)
+    return _limpar_preco_serper(it.get("price") or it.get("snippet") or "")
 
 
 def _href_item_serper(it):
@@ -2208,10 +2227,23 @@ def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
             ofertas,
             _item_google(termo, titulo, preco, href, foto, plat, origem="serper", pais=pais),
         )
-        if len(ofertas) >= limite:
-            break
-    ofertas.sort(key=lambda p: p.get("preco_num") or 9e9)
+    ofertas.sort(key=lambda p: float(p.get("preco_num") or 9e9))
     return ofertas[:limite]
+
+
+def isolar_produto_mais_barato(ofertas, pais="BR"):
+    """Primeiro item após ordenar do menor para o maior, já com afiliado."""
+    pais = _normalizar_pais(pais)
+    lista = [
+        p for p in (ofertas or [])
+        if isinstance(p, dict) and float(p.get("preco_num") or p.get("preco_numerico") or 0) > 0
+        and float(p.get("preco_num") or p.get("preco_numerico") or 0) < 999990
+    ]
+    lista.sort(key=lambda p: float(p.get("preco_num") or p.get("preco_numerico") or 9e9))
+    if not lista:
+        return None
+    carimbada = _carimbar_lista_afiliado([lista[0]], pais=pais)
+    return carimbada[0] if carimbada else lista[0]
 
 
 def _item_serper_loja_ok(it, pais="BR"):
@@ -2278,6 +2310,7 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
     ]
     ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite, pais=pais)
     ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
+    ofertas.sort(key=lambda p: float(p.get("preco_num") or 9e9))
     if usar_cache and ofertas:
         _gravar_cache_garimpo(t, ofertas, pais=pais)
     print(f"[Serper] {len(ofertas)} ofertas filtradas ({pais}: {', '.join(_lojas_do_pais(pais))})")
@@ -3928,6 +3961,22 @@ def executar_testes_unitarios():
            "filtro source recusa loja fora das 3 oficiais")
     checar(abs(_preco_serper_para_float("R$ 1.799,00") - 1799.0) < 0.01,
            "preço Serper R$ 1.799,00 vira 1799.00")
+    checar(abs(_limpar_preco_serper("R$ 1.799,00") - 1799.0) < 0.01,
+           "limpa R$, espaço, ponto e vírgula para float")
+    barato = isolar_produto_mais_barato([
+        {"titulo": "Caro", "preco_num": 900.0, "url": "https://www.amazon.com.br/dp/B0CARO0000",
+         "foto": "https://m.media-amazon.com/images/I/c.jpg", "plataforma": "amazon",
+         "loja": "Amazon", "fonte": "google", "pais": "BR"},
+        {"titulo": "Barato DualSense", "preco_num": 404.27, "url": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+         "foto": "https://m.media-amazon.com/images/I/d.jpg", "plataforma": "amazon",
+         "loja": "Amazon", "fonte": "google", "pais": "BR"},
+    ], pais="BR")
+    checar(
+        barato and barato.get("titulo") == "Barato DualSense"
+        and "/dp/B0CQKLS4RP" in (barato.get("url") or "")
+        and f"tag={ID_AMAZON}" in (barato.get("url") or barato.get("link_afiliado") or ""),
+        "isola o produto mais barato com link e afiliado",
+    )
     magalu = _ofertas_de_itens_serper("tv", [{
         "title": "Smart TV 50",
         "source": "Magazine Luiza",

@@ -28,10 +28,14 @@ from garimpo_jds import (  # noqa: E402
     ID_MERCADO_LIVRE,
     ID_SHOPEE,
     _arquivo_cache_sqlite,
+    _chave_cache,
+    _chaves_env,
     _normalizar_pais,
     buscar_ofertas_por_pais,
     buscar_ofertas_serper_shopping,
+    isolar_produto_mais_barato,
     serializar_lista_app,
+    serializar_oferta_app,
 )
 
 app = FastAPI(
@@ -77,17 +81,24 @@ def _autorizar_app(
 def _resposta_ofertas(termo, ofertas, pais="BR"):
     pais = _normalizar_pais(pais)
     lista = serializar_lista_app(ofertas or [], pais=pais)
-    campeao = lista[0] if lista else None
+    lista.sort(key=lambda p: float(p.get("preco_numerico") or 9e9))
+    campeao = isolar_produto_mais_barato(lista, pais=pais)
+    if campeao:
+        campeao = serializar_oferta_app(campeao, pais=pais)
     return {
         "termo": termo,
         "pais": pais,
         "total": len(lista),
         "cache": _chave_cache(termo, pais=pais),
+        "titulo": None if not campeao else campeao.get("titulo"),
+        "loja": None if not campeao else campeao.get("loja"),
+        "link": None if not campeao else campeao.get("link_afiliado"),
         "menor_preco": None if not campeao else {
             "titulo": campeao.get("titulo"),
+            "loja": campeao.get("loja"),
+            "link": campeao.get("link_afiliado"),
             "preco_formatado": campeao.get("preco_formatado"),
             "preco_numerico": campeao.get("preco_numerico"),
-            "loja": campeao.get("loja"),
             "link_afiliado": campeao.get("link_afiliado"),
             "imagem": campeao.get("imagem"),
         },
