@@ -1111,8 +1111,30 @@ def _parece_artigo_nao_produto(titulo):
     ))
 
 
+def _titulo_e_acessorio_imediato(titulo):
+    """Descarta capinha, película, capa, suporte e cabo no título, na hora."""
+    t = _sem_acento(titulo or "")
+    for palavra in ("capinha", "pelicula", "capa", "suporte", "cabo"):
+        if re.search(rf"(?<![a-z0-9]){re.escape(palavra)}(?![a-z0-9])", t):
+            return True
+    return False
+
+
+def _termo_contido_no_titulo(termo, titulo):
+    """Ex.: 'controle ps5' precisa aparecer no título (com sinônimos)."""
+    toks = _tokens_busca(termo)
+    if not toks:
+        return True
+    t = _sem_acento(titulo or "")
+    if not t:
+        return False
+    return all(_token_no_titulo(tok, t) for tok in toks)
+
+
 def _titulo_relevante(termo, titulo):
     if _titulo_usado(titulo):
+        return False
+    if _titulo_e_acessorio_imediato(titulo):
         return False
     toks = _tokens_busca(termo)
     if not toks:
@@ -1857,7 +1879,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v19:" + pais + ":" + _termo_cache_norm(termo)
+    return "v20:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2497,8 +2519,12 @@ def _serper_post(caminho, corpo):
 
 
 def _preco_item_serper(it, pais="BR"):
+    """Preço só deste bloco: string price (R$ 1.799,00 → 1799.00), senão extracted_price."""
     if not isinstance(it, dict):
         return 0.0
+    n = _limpar_preco_serper(it.get("price"), pais=pais)
+    if n > 0:
+        return n
     for k in ("extracted_price", "extractedPrice"):
         try:
             n = float(it.get(k))
@@ -2506,19 +2532,91 @@ def _preco_item_serper(it, pais="BR"):
                 return n
         except (TypeError, ValueError):
             pass
-    return _limpar_preco_serper(it.get("price") or it.get("snippet") or "", pais=pais)
+    return 0.0
 
 
 def _href_item_serper(it):
+    """Link só deste bloco — não vasculha JSON inteiro (evita URL de outra loja)."""
     if not isinstance(it, dict):
         return ""
-    for k in ("productLink", "merchantLink", "link", "url"):
-        h = _desempacotar_link_google((it.get(k) or "").strip())
-        if h and _plataforma_loja(h):
+    for k in ("link", "productLink", "merchantLink"):
+        bruto = it.get(k)
+        if not isinstance(bruto, str) or not bruto.strip():
+            continue
+        h = _desempacotar_link_google(bruto.strip())
+        if h and (_plataforma_loja(h) or (h.startswith("http") and "google." not in h.lower())):
             return h.split("#")[0]
-        if h and h.startswith("http") and "google." not in h.lower():
-            return h.split("#")[0]
-    return _primeira_url_loja(json.dumps(it, ensure_ascii=False))
+    return ""
+
+
+def _bloco_serper_isolado(it):
+    """title, source, price e link do mesmo item da lista shopping."""
+    if not isinstance(it, dict):
+        return None
+    return {
+        "title": str(it.get("title") or "").strip(),
+        "source": str(it.get("source") or it.get("domain") or "").strip(),
+        "price": it.get("price"),
+        "link": str(it.get("link") or it.get("productLink") or "").strip(),
+        "imageUrl": str(it.get("imageUrl") or it.get("image") or "").strip(),
+        "extracted_price": it.get("extracted_price", it.get("extractedPrice")),
+    }
+
+
+def _item_serper_loja_ok(it, pais="BR"):
+    if not isinstance(it, dict):
+        return False
+    pais = _normalizar_pais(pais)
+    bloco = _bloco_serper_isolado(it)
+    src = bloco["source"]
+    href = _href_item_serper(bloco)
+    plat_src = _loja_do_texto(src) if src else ""
+    plat_link = _plataforma_loja(href) if href else ""
+    if plat_src and plat_link and plat_src != plat_link:
+        return False
+    plat = plat_link or plat_src
+    if plat not in _lojas_do_pais(pais) and not _source_loja_oficial(src, pais=pais):
+        return False
+    if pais == "US":
+        if plat == "amazon" and href and not _host_amazon_eua(href):
+            return False
+        return plat in {"amazon", "ebay"} or _source_loja_oficial(src, pais="US")
+    return _source_loja_oficial(src, pais="BR") or plat in {
+        "amazon", "mercado_livre", "shopee",
+    }
+
+
+def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
+    """Um item da lista shopping por vez: title/source/price/link daquele bloco só."""
+    pais = _normalizar_pais(pais)
+    ofertas = []
+    for it in itens or []:
+        if not isinstance(it, dict):
+            continue
+        bloco = _bloco_serper_isolado(it)
+        if not bloco:
+            continue
+        titulo = bloco["title"]
+        if _titulo_e_acessorio_imediato(titulo):
+            continue
+        if not _termo_contido_no_titulo(termo, titulo):
+            continue
+        if not _item_serper_loja_ok(bloco, pais=pais):
+            continue
+        href = _href_item_serper(bloco)
+        plat_src = _loja_do_texto(bloco["source"])
+        plat_link = _plataforma_loja(href)
+        if plat_src and plat_link and plat_src != plat_link:
+            continue
+        plat = plat_link or plat_src
+        preco = _preco_item_serper(bloco, pais=pais)
+        foto = bloco["imageUrl"]
+        ofertas = _guardar_melhor_loja(
+            ofertas,
+            _item_google(termo, titulo, preco, href, foto, plat, origem="serper", pais=pais),
+        )
+    ofertas.sort(key=lambda p: float(p.get("preco_num") or 9e9))
+    return ofertas[:limite]
 
 
 def _guardar_melhor_loja(ofertas, item):
@@ -2541,28 +2639,6 @@ def _guardar_melhor_loja(ofertas, item):
     return ofertas
 
 
-def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
-    pais = _normalizar_pais(pais)
-    ofertas = []
-    for it in itens or []:
-        if not isinstance(it, dict):
-            continue
-        if not _item_serper_loja_ok(it, pais=pais):
-            continue
-        titulo = (it.get("title") or it.get("name") or termo or "").strip()
-        blob = " ".join(str(it.get(k) or "") for k in ("source", "domain", "title", "snippet", "link"))
-        href = _href_item_serper(it)
-        plat = _plataforma_loja(href) or _loja_do_texto(blob)
-        preco = _preco_item_serper(it, pais=pais)
-        foto = (it.get("imageUrl") or it.get("image") or "").strip()
-        ofertas = _guardar_melhor_loja(
-            ofertas,
-            _item_google(termo, titulo, preco, href, foto, plat, origem="serper", pais=pais),
-        )
-    ofertas.sort(key=lambda p: float(p.get("preco_num") or 9e9))
-    return ofertas[:limite]
-
-
 def isolar_produto_mais_barato(ofertas, pais="BR"):
     """Primeiro item após ordenar do menor para o maior, já com afiliado."""
     pais = _normalizar_pais(pais)
@@ -2576,24 +2652,6 @@ def isolar_produto_mais_barato(ofertas, pais="BR"):
         return None
     carimbada = _carimbar_lista_afiliado([lista[0]], pais=pais)
     return carimbada[0] if carimbada else lista[0]
-
-
-def _item_serper_loja_ok(it, pais="BR"):
-    if not isinstance(it, dict):
-        return False
-    pais = _normalizar_pais(pais)
-    src = it.get("source") or it.get("domain") or ""
-    href = _href_item_serper(it)
-    plat = _plataforma_loja(href) or _loja_do_texto(src)
-    if plat not in _lojas_do_pais(pais) and not _source_loja_oficial(src, pais=pais):
-        return False
-    if pais == "US":
-        if plat == "amazon" and href and not _host_amazon_eua(href):
-            return False
-        return plat in {"amazon", "ebay"} or _source_loja_oficial(src, pais="US")
-    return _source_loja_oficial(src, pais="BR") or plat in {
-        "amazon", "mercado_livre", "shopee",
-    }
 
 
 def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR"):
@@ -4282,6 +4340,51 @@ def executar_testes_unitarios():
     checar(
         any("/dp/B0CQKLS4RP" in (p.get("url") or "") for p in serper_of),
         "Serper Amazon usa o /dp/ do Google",
+    )
+    misturado_serper = _ofertas_de_itens_serper("controle ps5", [
+        {
+            "title": "Controle DualSense PS5 Sony Original",
+            "source": "Amazon.com.br",
+            "price": "R$ 514,89",
+            "link": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+            "imageUrl": "https://m.media-amazon.com/images/I/dual.jpg",
+            "snippet": "Mercado Livre R$ 419,00 https://www.mercadolivre.com.br/outro/p/MLB1",
+        },
+        {
+            "title": "Controle DualSense Sony PlayStation 5",
+            "source": "Mercado Livre",
+            "price": "R$ 419,00",
+            "link": "https://www.mercadolivre.com.br/dualsense-ps5/p/MLB32344506",
+            "imageUrl": "https://http2.mlstatic.com/D_NQ_NP_teste-O.jpg",
+        },
+        {
+            "title": "Capa para Controle PS5 DualSense",
+            "source": "Shopee",
+            "price": "R$ 29,90",
+            "link": "https://shopee.com.br/Capa-Controle-i.1.2",
+            "imageUrl": "https://cf.shopee.com.br/file/capa.jpg",
+        },
+    ])
+    amz_m = next(p for p in misturado_serper if p.get("plataforma") == "amazon")
+    ml_m = next(p for p in misturado_serper if p.get("plataforma") == "mercado_livre")
+    checar(
+        abs(float(amz_m.get("preco_num") or 0) - 514.89) < 0.05
+        and "amazon.com.br" in (amz_m.get("url") or "")
+        and "mercadolivre" not in (amz_m.get("url") or ""),
+        "preço e link da Amazon não misturam com o Mercado Livre",
+    )
+    checar(
+        abs(float(ml_m.get("preco_num") or 0) - 419.0) < 0.05
+        and "mercadolivre" in (ml_m.get("url") or ""),
+        "preço e link do Mercado Livre ficam no bloco do ML",
+    )
+    checar(
+        misturado_serper[0].get("plataforma") == "mercado_livre",
+        "menor preço float da loja certa vai para o topo",
+    )
+    checar(
+        not any(p.get("plataforma") == "shopee" for p in misturado_serper),
+        "capa/capinha/suporte/cabo da Shopee é descartado",
     )
     checar(_source_loja_oficial("Amazon.com.br") and _source_loja_oficial("MERCADO LIVRE"),
            "filtro source aceita Amazon e Mercado Livre")
