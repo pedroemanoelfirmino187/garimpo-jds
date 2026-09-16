@@ -15,6 +15,7 @@ import urllib.parse
 import sqlite3
 import threading
 import json
+import locale
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
@@ -90,6 +91,189 @@ def mensagem_servidor(chave, pais="BR"):
     bloco = _TEXTOS_SERVIDOR.get(chave) or {}
     idioma = "US" if _normalizar_pais(pais) == "US" else "BR"
     return bloco.get(idioma) or bloco.get("BR") or str(chave or "")
+
+
+def idioma_eh_portugues(texto):
+    s = (texto or "").strip().lower().replace("_", "-")
+    if not s:
+        return False
+    if "portuguese" in s or "portugues" in s:
+        return True
+    return bool(re.search(r"(?:^|[\s,;/])pt(?:[-@.]|$)", " " + s))
+
+
+def pais_pelo_idioma(texto_locale):
+    """Locale 'pt' (pt, pt-BR, pt-PT) → BR. Qualquer outro idioma → US."""
+    return "BR" if idioma_eh_portugues(texto_locale) else "US"
+
+
+def detectar_locale_sistema(page=None):
+    """Lê o idioma padrão do aparelho/OS, sem pedir escolha ao usuário."""
+    partes = []
+    if page is not None:
+        for nome in ("platform_locale", "web_renderer"):
+            val = getattr(page, nome, None)
+            if val and nome != "web_renderer":
+                partes.append(str(val))
+        loc = getattr(page, "locale", None)
+        if loc is not None:
+            partes.append(str(loc))
+            for attr in ("language_code", "language", "script", "country_code", "locale_name"):
+                val = getattr(loc, attr, None)
+                if val:
+                    partes.append(str(val))
+    for envk in ("LANG", "LC_ALL", "LC_MESSAGES", "LANGUAGE"):
+        val = (os.environ.get(envk) or "").strip()
+        if val:
+            partes.append(val)
+    for fn in (locale.getdefaultlocale, locale.getlocale):
+        try:
+            par = fn()
+            if par and par[0]:
+                partes.append(str(par[0]))
+        except Exception:
+            pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(128)
+            if ctypes.windll.kernel32.GetUserDefaultLocaleName(buf, 128):
+                partes.append(buf.value)
+            langid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+            if (int(langid) & 0x3FF) == 0x16:
+                partes.append("pt")
+        except Exception:
+            pass
+    return " ".join(str(p) for p in partes if p)
+
+
+def pais_do_dispositivo(page=None):
+    return pais_pelo_idioma(detectar_locale_sistema(page))
+
+
+_TEXTOS_APP = {
+    "hint_busca": {"BR": "Garimpar produto...", "US": "Search a product..."},
+    "garimpar": {"BR": "Garimpar", "US": "Search"},
+    "tooltip_voz": {"BR": "Falar qualquer produto", "US": "Speak any product"},
+    "tooltip_share": {"BR": "Compartilhar", "US": "Share"},
+    "hint_menor": {
+        "BR": "O menor preço aparece no topo após o garimpo.",
+        "US": "The lowest price appears on top after the search.",
+    },
+    "cole_link": {"BR": "Cole o link do produto", "US": "Paste the product link"},
+    "pontos": {"BR": "Pontos JDS: {n}", "US": "JDS points: {n}"},
+    "roleta_hint": {"BR": "Gire a Roleta da Sorte semanal", "US": "Spin the weekly lucky wheel"},
+    "checkin": {"BR": "Check-in Diário", "US": "Daily check-in"},
+    "loja": {"BR": "Loja", "US": "Store"},
+    "ver_oferta": {"BR": "Ver Oferta", "US": "View Deal"},
+    "copiar_titulo": {"BR": "Copiar título", "US": "Copy title"},
+    "lista_desejos": {"BR": "Lista de Desejos", "US": "Wishlist"},
+    "melhor_preco": {"BR": "🔥 MELHOR PREÇO", "US": "🔥 BEST PRICE"},
+    "menor_preco_selo": {"BR": "🏆 MENOR PREÇO", "US": "🏆 LOWEST PRICE"},
+    "primeiro": {"BR": "🏆 1º LUGAR", "US": "🏆 1ST PLACE"},
+    "loja_oficial": {"BR": "LOJA OFICIAL", "US": "OFFICIAL STORE"},
+    "anti_golpe": {"BR": "ANTI-GOLPE: confira o vendedor", "US": "SCAM CHECK: review the seller"},
+    "novo": {"BR": "NOVO", "US": "NEW"},
+    "titulo_copiado": {"BR": "Título copiado", "US": "Title copied"},
+    "cupom": {
+        "BR": "Cupom JDS10 copiado. Cole no carrinho da loja.",
+        "US": "Coupon JDS10 copied. Paste it in the store cart.",
+    },
+    "ja_desejo": {
+        "BR": "Este produto já está na Lista de Desejos",
+        "US": "This product is already on the Wishlist",
+    },
+    "guardado": {
+        "BR": "Guardado. Vamos avisar se o preço cair (app aberto).",
+        "US": "Saved. We'll notify you if the price drops (app open).",
+    },
+    "preco_caiu": {"BR": "Preço caiu!", "US": "Price dropped!"},
+    "desconto": {"BR": "Desconto: {titulo} agora {preco}", "US": "Deal: {titulo} now {preco}"},
+    "sem_alerta": {
+        "BR": "Nenhum alerta ainda. Toque na estrela de um card no Garimpar.",
+        "US": "No alerts yet. Tap the star on a card in Search.",
+    },
+    "caiu": {"BR": "Caiu: {a} → {b}", "US": "Dropped: {a} → {b}"},
+    "monitorando": {"BR": "Monitorando {p}", "US": "Watching {p}"},
+    "alerta_ativo": {
+        "BR": "Alerta ativo — aviso no app se o preço cair",
+        "US": "Alert on — we'll notify in the app if the price drops",
+    },
+    "remover": {"BR": "Remover", "US": "Remove"},
+    "removido": {"BR": "Removido da Lista de Desejos", "US": "Removed from Wishlist"},
+    "sem_desejos": {"BR": "Nenhum produto na Lista de Desejos", "US": "No products on the Wishlist"},
+    "verificando": {"BR": "Verificando preços da Lista de Desejos...", "US": "Checking Wishlist prices..."},
+    "sem_desconto": {"BR": "Nenhum desconto novo agora", "US": "No new discounts right now"},
+    "digite": {"BR": "Digite um produto para garimpar", "US": "Type a product to search"},
+    "ainda": {"BR": "Ainda garimpando o produto anterior...", "US": "Still searching the previous product..."},
+    "nenhuma_oferta": {"BR": "Nenhuma oferta encontrada para este termo", "US": "No products found"},
+    "menor_preco_linha": {
+        "BR": "Menor preço: {preco} na {loja}",
+        "US": "Lowest price: {preco} at {loja}",
+    },
+    "falha_motor": {"BR": "Falha no motor de busca: {e}", "US": "Search error: {e}"},
+    "fale": {"BR": "Fale o produto... (qualquer um)", "US": "Say the product... (anything)"},
+    "nao_entendi": {
+        "BR": "Não entendi. Fale de novo ou digite o produto.",
+        "US": "Didn't catch that. Speak again or type the product.",
+    },
+    "cole_valido": {"BR": "Cole um link válido", "US": "Paste a valid link"},
+    "achado_ok": {"BR": "Link pronto para abrir com rastreio JDS", "US": "Link ready to open with JDS tracking"},
+    "achado_validado": {"BR": "Achado validado pela JDS Economiza", "US": "Find validated by JDS Economiza"},
+    "checkin_feito": {"BR": "Check-in de hoje já feito", "US": "Today's check-in already done"},
+    "checkin_ok": {"BR": "Check-in diário +25 pontos", "US": "Daily check-in +25 points"},
+    "roleta_ja": {"BR": "A roleta já girou nesta semana", "US": "The wheel already spun this week"},
+    "roleta_premio": {"BR": "Roleta da Sorte: {premio}", "US": "Lucky wheel: {premio}"},
+    "roleta_snack": {"BR": "Roleta: {premio}", "US": "Wheel: {premio}"},
+    "tab_garimpar": {"BR": "🔍 Garimpar", "US": "🔍 Search"},
+    "tab_descontos": {"BR": "🔥 Super Descontos", "US": "🔥 Super Deals"},
+    "tab_desejos": {"BR": "⭐ Lista de Desejos", "US": "⭐ Wishlist"},
+    "tab_achados": {"BR": "👥 Achados", "US": "👥 Finds"},
+    "tab_recompensas": {"BR": "🎰 Recompensas", "US": "🎰 Rewards"},
+    "promo_jds": {
+        "BR": "Promoções agressivas selecionadas pela JDS",
+        "US": "Aggressive deals selected by JDS",
+    },
+    "aviso_desejos": {
+        "BR": "Aviso no app se o preço cair. Precisa do JDS aberto. Checagem a cada 15 min.",
+        "US": "In-app alert if the price drops. Keep JDS open. Checks every 15 min.",
+    },
+    "verificar_agora": {"BR": "Verificar preços agora", "US": "Check prices now"},
+    "cole_rastreio": {
+        "BR": "Cole um link. A JDS Economiza trata o rastreio em segundo plano.",
+        "US": "Paste a link. JDS Economiza handles tracking in the background.",
+    },
+    "validar": {"BR": "Validar achado", "US": "Validate find"},
+    "roleta_titulo": {"BR": "Roleta da Sorte semanal", "US": "Weekly lucky wheel"},
+    "girar": {"BR": "Girar roleta", "US": "Spin the wheel"},
+    "convite_titulo": {"BR": "Convite JDS Economiza", "US": "JDS Economiza invite"},
+    "convite_corpo": {
+        "BR": "JDS Economiza — o app híbrido para garimpar o menor preço na Amazon, Shopee e Mercado Livre. Compartilhe e economize com a JDS.",
+        "US": "JDS Economiza — the hybrid app to hunt the lowest price on Amazon and eBay. Share and save with JDS.",
+    },
+    "convite_copiado": {"BR": "O texto do convite já foi copiado.", "US": "The invite text was copied."},
+    "fechar": {"BR": "Fechar", "US": "Close"},
+    "copiado": {"BR": "Copiado", "US": "Copied"},
+    "nao_copiar": {"BR": "Não foi possível copiar agora", "US": "Couldn't copy right now"},
+    "de_por": {"BR": "De {a} por {b}", "US": "From {a} to {b}"},
+    "premio_50": {"BR": "+50 pontos", "US": "+50 points"},
+    "premio_cupom": {"BR": "Cupom JDS10", "US": "JDS10 coupon"},
+    "premio_frete": {"BR": "Frete monitorado", "US": "Tracked shipping"},
+    "premio_alerta": {"BR": "Alerta extra", "US": "Extra alert"},
+    "premio_tente": {"BR": "Tente na próxima semana", "US": "Try again next week"},
+}
+
+
+def texto_app(chave, pais="BR", **kwargs):
+    bloco = _TEXTOS_APP.get(chave) or {}
+    idioma = "US" if _normalizar_pais(pais) == "US" else "BR"
+    s = bloco.get(idioma) or bloco.get("BR") or str(chave or "")
+    if kwargs:
+        try:
+            s = s.format(**kwargs)
+        except Exception:
+            pass
+    return s
 
 
 def _serper_locale(pais="BR"):
@@ -269,6 +453,7 @@ def _item_desejo_gravavel(item):
         "foto": item.get("foto") or "",
         "plataforma": item.get("plataforma") or "",
         "loja": item.get("loja") or "",
+        "pais": _normalizar_pais(item.get("pais") or "BR"),
         "alerta": True,
         "queda": bool(item.get("queda")),
         "preco_anterior": item.get("preco_anterior") or "",
@@ -3153,6 +3338,10 @@ def main(page):
     page.window.min_height = 640
     page.window.resizable = True
     page.window.maximizable = True
+    mercado = {"pais": pais_do_dispositivo(page)}
+
+    def tx(chave, **kwargs):
+        return texto_app(chave, mercado["pais"], **kwargs)
 
     def fechar_dialogo(e=None):
         try:
@@ -3182,18 +3371,15 @@ def main(page):
         except Exception:
             pass
 
-    async def copiar_texto(texto, ok_msg="Copiado"):
+    async def copiar_texto(texto, ok_msg=None):
         try:
             await page.clipboard.set(texto)
-            snack(ok_msg, "#00F5D4")
+            snack(ok_msg or tx("copiado"), "#00F5D4")
         except Exception:
-            snack("Não foi possível copiar agora", "#FF6B6B")
+            snack(tx("nao_copiar"), "#FF6B6B")
 
     async def abrir_compartilhar(e=None):
-        convite = (
-            "JDS Economiza — o app híbrido para garimpar o menor preço "
-            "na Amazon, Shopee e Mercado Livre. Compartilhe e economize com a JDS."
-        )
+        convite = tx("convite_corpo")
         try:
             await page.clipboard.set(convite)
         except Exception:
@@ -3201,15 +3387,15 @@ def main(page):
         page.show_dialog(
             ft.AlertDialog(
                 bgcolor="#1A1A1E",
-                title=ft.Text("Convite JDS Economiza",
+                title=ft.Text(tx("convite_titulo"),
                               color="#9D4EDD", weight=ft.FontWeight.BOLD),
                 content=ft.Text(
-                    convite + "\n\nO texto do convite já foi copiado.",
+                    convite + "\n\n" + tx("convite_copiado"),
                     color="#EDEDED",
                     size=13,
                 ),
                 actions=[
-                    ft.Button("Fechar", on_click=fechar_dialogo),
+                    ft.Button(tx("fechar"), on_click=fechar_dialogo),
                 ],
             )
         )
@@ -3236,7 +3422,7 @@ def main(page):
     btn_share = ft.IconButton(
         icon=ft.Icons.SHARE,
         icon_color="#9D4EDD",
-        tooltip="Compartilhar",
+        tooltip=tx("tooltip_share"),
         on_click=abrir_compartilhar,
     )
     topo = ft.Row(
@@ -3246,7 +3432,7 @@ def main(page):
     )
 
     campo_busca = ft.TextField(
-        hint_text="Garimpar produto...",
+        hint_text=tx("hint_busca"),
         value="",
         border_color="#9D4EDD",
         focused_border_color="#00F5D4",
@@ -3257,49 +3443,13 @@ def main(page):
         height=52,
     )
     txt_busca = campo_busca
-    mercado = {"pais": "BR"}
-
-    def _estilo_mercado(ativo):
-        return "#9D4EDD" if ativo else "#2A2A30"
-
-    def _pintar_mercado():
-        btn_br.bgcolor = _estilo_mercado(mercado["pais"] == "BR")
-        btn_us.bgcolor = _estilo_mercado(mercado["pais"] == "US")
-        campo_busca.hint_text = (
-            "Search US product (Amazon + eBay)..."
-            if mercado["pais"] == "US"
-            else "Garimpar produto..."
-        )
-
-    def escolher_mercado(pais):
-        def _on(e=None):
-            mercado["pais"] = _normalizar_pais(pais)
-            _pintar_mercado()
-            page.update()
-        return _on
-
-    btn_br = ft.Button(
-        "Brasil", bgcolor="#9D4EDD", color="white", on_click=escolher_mercado("BR"),
-    )
-    btn_us = ft.Button(
-        "EUA", bgcolor="#2A2A30", color="white", on_click=escolher_mercado("US"),
-    )
-    linha_mercado = ft.Row(
-        [
-            ft.Text("Mercado:", color="#AAAAAA", size=12),
-            btn_br,
-            btn_us,
-        ],
-        spacing=8,
-        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-    )
     rodinha = ft.Row(
         [ft.ProgressRing(color="#9D4EDD", width=22, height=22)],
         alignment=ft.MainAxisAlignment.CENTER,
         visible=False,
     )
     lbl_menor_preco = ft.Text(
-        "O menor preço aparece no topo após o garimpo.",
+        tx("hint_menor"),
         color="#00F5D4",
         size=13,
         weight=ft.FontWeight.BOLD,
@@ -3310,20 +3460,20 @@ def main(page):
     coluna_desejos = ft.Column(spacing=10)
     lista_achados = ft.Column(spacing=10)
     txt_achado = ft.TextField(
-        label="Cole o link do produto",
+        label=tx("cole_link"),
         border_color="#9D4EDD",
         bgcolor="#1A1A1E",
         color="#FFFFFF",
         border_radius=12,
     )
     lbl_pontos = ft.Text(
-        f"Pontos JDS: {pontos_jds['saldo']}",
+        tx("pontos", n=pontos_jds["saldo"]),
         color="#00F5D4",
         size=16, weight=ft.FontWeight.BOLD)
-    lbl_roleta = ft.Text("Gire a Roleta da Sorte semanal",
+    lbl_roleta = ft.Text(tx("roleta_hint"),
                          color="#EDEDED", size=13)
     btn_checkin = ft.Button(
-        "Check-in Diário", bgcolor="#9D4EDD", color="white")
+        tx("checkin"), bgcolor="#9D4EDD", color="white")
 
     def chip(texto, cor):
         return ft.Container(
@@ -3347,18 +3497,18 @@ def main(page):
         elif plat == "ebay":
             selos.append(chip("🔵 eBay", "#0064D2"))
 
-        selos.append(chip(produto.get("selo") or "NOVO", "#00F5D4"))
+        selos.append(chip(produto.get("selo") or tx("novo"), "#00F5D4"))
         if extra_selo:
             selos.append(chip(extra_selo, "#FF4D6D"))
         if produto.get("full"):
             selos.append(chip("FULL", "#4CC9F0"))
         if produto.get("loja_oficial"):
-            selos.append(chip("LOJA OFICIAL", "#9D4EDD"))
+            selos.append(chip(tx("loja_oficial"), "#9D4EDD"))
         if produto.get("aviso_golpe"):
-            selos.append(chip("ANTI-GOLPE: confira o vendedor", "#FFB703"))
+            selos.append(chip(tx("anti_golpe"), "#FFB703"))
 
         async def copiar_titulo(e):
-            await copiar_texto(produto["titulo"], "Título copiado")
+            await copiar_texto(produto["titulo"], tx("titulo_copiado"))
 
         async def ver_oferta(e, prod=produto):
             fechar_todos_dialogos()
@@ -3366,7 +3516,7 @@ def main(page):
                 await page.clipboard.set(CUPOM_JDS)
             except Exception:
                 pass
-            snack("Cupom JDS10 copiado. Cole no carrinho da loja.", "#00F5D4")
+            snack(tx("cupom"), "#00F5D4")
             url_abrir = prod.get("link_afiliado") or _link_compra_do_card(prod)
             try:
                 await page.launch_url(url_abrir)
@@ -3378,13 +3528,14 @@ def main(page):
         def salvar_desejo(e):
             url = produto.get("url") or ""
             if any(_url_chave(x.get("url")) == _url_chave(url) and url for x in lista_desejos):
-                snack("Este produto já está na Lista de Desejos", "#FFB703")
+                snack(tx("ja_desejo"), "#FFB703")
                 return
             item = _item_desejo_gravavel(produto)
+            item["pais"] = _normalizar_pais(produto.get("pais") or mercado["pais"])
             lista_desejos.append(item)
             _salvar_desejos()
             render_desejos()
-            snack("Guardado. Vamos avisar se o preço cair (app aberto).", "#9D4EDD")
+            snack(tx("guardado"), "#9D4EDD")
 
         return ft.Container(
             bgcolor="#1A1A1E",
@@ -3405,7 +3556,7 @@ def main(page):
                     ),
                     ft.Row(selos, wrap=True, spacing=6, run_spacing=6),
                     ft.Text(
-                        f"Loja: {produto.get('loja') or _nome_loja(plat)}",
+                        f"{tx('loja')}: {produto.get('loja') or _nome_loja(plat)}",
                         color="#FFD700",
                         size=13,
                         weight=ft.FontWeight.BOLD,
@@ -3430,18 +3581,18 @@ def main(page):
                                 icon=ft.Icons.CONTENT_COPY,
                                 icon_color="#9D4EDD",
                                 icon_size=18,
-                                tooltip="Copiar título",
+                                tooltip=tx("copiar_titulo"),
                                 on_click=copiar_titulo,
                             ),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     ),
-                    ft.Text("🔥 MELHOR PREÇO", color="#FF6B35",
+                    ft.Text(tx("melhor_preco"), color="#FF6B35",
                             size=12, weight=ft.FontWeight.BOLD),
                     ft.Row(
                         [
                             ft.Button(
-                                "Ver Oferta",
+                                tx("ver_oferta"),
                                 bgcolor="#9D4EDD",  # Roxo chamativo
                                 color="white",
                                 on_click=ver_oferta,
@@ -3452,7 +3603,7 @@ def main(page):
                             ft.IconButton(
                                 icon=ft.Icons.STAR_BORDER,
                                 icon_color="#FFD700",
-                                tooltip="Lista de Desejos",
+                                tooltip=tx("lista_desejos"),
                                 on_click=salvar_desejo,
                             ),
                         ],
@@ -3468,17 +3619,17 @@ def main(page):
         for idx, produto in enumerate(produtos):
             selo_destaque = extra_selo
             if idx == 0 and not extra_selo:
-                selo_destaque = "🏆 MENOR PREÇO"
+                selo_destaque = tx("menor_preco_selo")
             elif idx == 0 and extra_selo:
-                selo_destaque = f"{extra_selo} | 🏆 1º LUGAR"
+                selo_destaque = f"{extra_selo} | {tx('primeiro')}"
             grade.controls.append(montar_card(
                 produto, extra_selo=selo_destaque))
 
     def avisar_queda(item, preco_novo):
         titulo = (item.get("titulo") or "Produto")[:80]
         antigo = item.get("preco_anterior") or item.get("preco")
-        msg = f"{titulo}\nDe {antigo} por {preco_novo}"
-        snack(f"Desconto: {titulo} agora {preco_novo}", "#00F5D4")
+        msg = f"{titulo}\n" + tx("de_por", a=antigo, b=preco_novo)
+        snack(tx("desconto", titulo=titulo, preco=preco_novo), "#00F5D4")
         try:
             page.window.minimized = False
             page.window.to_front()
@@ -3487,7 +3638,7 @@ def main(page):
         page.show_dialog(
             ft.AlertDialog(
                 bgcolor="#1A1A1E",
-                title=ft.Text("Preço caiu!", color="#00F5D4", weight=ft.FontWeight.BOLD),
+                title=ft.Text(tx("preco_caiu"), color="#00F5D4", weight=ft.FontWeight.BOLD),
                 content=ft.Text(msg, color="#EDEDED"),
                 actions=[ft.Button("OK", on_click=fechar_dialogo)],
             )
@@ -3498,15 +3649,15 @@ def main(page):
         if not lista_desejos:
             coluna_desejos.controls.append(
                 ft.Text(
-                    "Nenhum alerta ainda. Toque na estrela de um card no Garimpar.",
+                    tx("sem_alerta"),
                     color="#888888",
                 )
             )
         for idx, item in enumerate(list(lista_desejos)):
             status = (
-                f"Caiu: {item.get('preco_anterior')} → {item.get('preco')}"
+                tx("caiu", a=item.get("preco_anterior"), b=item.get("preco"))
                 if item.get("queda")
-                else f"Monitorando {item.get('preco')}"
+                else tx("monitorando", p=item.get("preco"))
             )
 
             def remover(e, i=idx):
@@ -3514,7 +3665,7 @@ def main(page):
                     lista_desejos.pop(i)
                     _salvar_desejos()
                     render_desejos()
-                    snack("Removido da Lista de Desejos", "#9D4EDD")
+                    snack(tx("removido"), "#9D4EDD")
 
             async def abrir_desejo(e, prod=item):
                 url = _link_compra_do_card(prod)
@@ -3540,13 +3691,13 @@ def main(page):
                             ft.Text(item.get("loja") or "", color="#FFD700", size=12),
                             ft.Text(status, color="#00F5D4"),
                             ft.Text(
-                                "Alerta ativo — aviso no app se o preço cair",
+                                tx("alerta_ativo"),
                                 color="#FFD700", size=12),
                             ft.Row(
                                 [
-                                    ft.Button("Ver Oferta", bgcolor="#9D4EDD",
+                                    ft.Button(tx("ver_oferta"), bgcolor="#9D4EDD",
                                               color="white", on_click=abrir_desejo),
-                                    ft.Button("Remover", bgcolor="#2A2A2E",
+                                    ft.Button(tx("remover"), bgcolor="#2A2A2E",
                                               color="white", on_click=remover),
                                 ]
                             ),
@@ -3576,10 +3727,10 @@ def main(page):
     async def verificar_desejos(_e=None, silencioso=False):
         if not lista_desejos:
             if not silencioso:
-                snack("Nenhum produto na Lista de Desejos")
+                snack(tx("sem_desejos"))
             return
         if not silencioso:
-            snack("Verificando preços da Lista de Desejos...", "#9D4EDD")
+            snack(tx("verificando"), "#9D4EDD")
         houve = False
         for item in lista_desejos:
             termo = (item.get("titulo") or "").strip()
@@ -3607,7 +3758,7 @@ def main(page):
         _salvar_desejos()
         render_desejos()
         if not silencioso and not houve:
-            snack("Nenhum desconto novo agora", "#FFB703")
+            snack(tx("sem_desconto"), "#FFB703")
 
     async def loop_alertas_desejos():
         await asyncio.sleep(45)
@@ -3624,10 +3775,10 @@ def main(page):
         fechar_todos_dialogos()
         termo = (txt_busca.value or "").strip()
         if not termo:
-            snack("Digite um produto para garimpar")
+            snack(tx("digite"))
             return
         if buscando["ok"]:
-            snack("Ainda garimpando o produto anterior...", "#FFB703")
+            snack(tx("ainda"), "#FFB703")
             return
         buscando["ok"] = True
         rodinha.visible = True
@@ -3638,11 +3789,13 @@ def main(page):
             preencher_grade(grade_garimpo, produtos)
             if not produtos:
                 lbl_menor_preco.visible = False
-                snack("Nenhuma oferta encontrada para este termo", "#FFB703")
+                snack(tx("nenhuma_oferta"), "#FFB703")
             else:
                 campeao = produtos[0]
-                lbl_menor_preco.value = (
-                    f"Menor preço: {campeao['preco']} na {campeao.get('loja', 'loja')}"
+                lbl_menor_preco.value = tx(
+                    "menor_preco_linha",
+                    preco=campeao["preco"],
+                    loja=campeao.get("loja", "loja"),
                 )
                 lbl_menor_preco.visible = True
                 snack(lbl_menor_preco.value, "#00F5D4")
@@ -3667,7 +3820,7 @@ def main(page):
                 pass
             await txt_busca.focus()
         except Exception as e:
-            snack(f"Falha no motor de busca: {e}", "#FF6B6B")
+            snack(tx("falha_motor", e=e), "#FF6B6B")
         finally:
             buscando["ok"] = False
             rodinha.visible = False
@@ -3676,7 +3829,7 @@ def main(page):
     txt_busca.on_submit = garimpar
 
     async def busca_voz(e):
-        snack("Fale o produto... (qualquer um)", "#9D4EDD")
+        snack(tx("fale"), "#9D4EDD")
         rodinha.visible = True
         page.update()
         try:
@@ -3687,7 +3840,7 @@ def main(page):
             rodinha.visible = False
             page.update()
         if not termo:
-            snack("Não entendi. Fale de novo ou digite o produto.", "#FFB703")
+            snack(tx("nao_entendi"), "#FFB703")
             return
         txt_busca.value = termo
         page.update()
@@ -3696,7 +3849,7 @@ def main(page):
     def converter_achado(e):
         bruto = (txt_achado.value or "").strip()
         if "http" not in bruto:
-            snack("Cole um link válido")
+            snack(tx("cole_valido"))
             return
         plat = _detectar_plataforma(bruto)
         if _host_amazon_eua(bruto):
@@ -3714,7 +3867,7 @@ def main(page):
                 except Exception:
                     pass
                 fechar_todos_dialogos()
-                snack("Cupom JDS10 copiado. Cole no carrinho da loja.", "#00F5D4")
+                snack(tx("cupom"), "#00F5D4")
                 try:
                     await page.launch_url(link)
                 except TypeError:
@@ -3727,64 +3880,63 @@ def main(page):
                     padding=10,
                     content=ft.Column(
                         [
-                            ft.Text("Achado validado pela JDS Economiza",
+                            ft.Text(tx("achado_validado"),
                                     color="#9D4EDD", size=12),
                             ft.Text(item["origem"], color="#AAAAAA",
                                     size=11, max_lines=2),
-                            ft.Button("Ver Oferta", bgcolor="#9D4EDD",
+                            ft.Button(tx("ver_oferta"), bgcolor="#9D4EDD",
                                       color="white", on_click=abrir),
                         ]
                     ),
                 )
             )
-        snack("Link pronto para abrir com rastreio JDS")
+        snack(tx("achado_ok"))
         page.update()
 
     def checkin_diario(e):
         hoje = date.today().isoformat()
         if pontos_jds["checkin"] == hoje:
-            snack("Check-in de hoje já feito", "#FFB703")
+            snack(tx("checkin_feito"), "#FFB703")
             return
         pontos_jds["checkin"] = hoje
         pontos_jds["saldo"] += 25
         _salvar_pontos()
-        lbl_pontos.value = f"Pontos JDS: {pontos_jds['saldo']}"
-        snack("Check-in diário +25 pontos", "#00F5D4")
+        lbl_pontos.value = tx("pontos", n=pontos_jds["saldo"])
+        snack(tx("checkin_ok"), "#00F5D4")
         page.update()
 
     def girar_roleta(e):
         semana = date.today().strftime("%Y-W%W")
         if pontos_jds.get("roleta") == semana:
-            snack("A roleta já girou nesta semana", "#FFB703")
+            snack(tx("roleta_ja"), "#FFB703")
             return
         premio = random.choice(
-            ["+50 pontos", "Cupom JDS10", "Frete monitorado",
-                "Alerta extra", "Tente na próxima semana"]
+            [tx("premio_50"), tx("premio_cupom"), tx("premio_frete"),
+             tx("premio_alerta"), tx("premio_tente")]
         )
         if "50" in premio:
             pontos_jds["saldo"] += 50
         pontos_jds["roleta"] = semana
         _salvar_pontos()
-        lbl_pontos.value = f"Pontos JDS: {pontos_jds['saldo']}"
-        lbl_roleta.value = f"Roleta da Sorte: {premio}"
-        snack(f"Roleta: {premio}", "#9D4EDD")
+        lbl_pontos.value = tx("pontos", n=pontos_jds["saldo"])
+        lbl_roleta.value = tx("roleta_premio", premio=premio)
+        snack(tx("roleta_snack", premio=premio), "#9D4EDD")
         page.update()
 
     btn_checkin.on_click = checkin_diario
 
     aba_garimpar = ft.Column(
         [
-            linha_mercado,
             ft.Row(
                 [
                     txt_busca,
                     ft.IconButton(
                         icon=ft.Icons.MIC,
                         icon_color="#9D4EDD",
-                        tooltip="Falar qualquer produto",
+                        tooltip=tx("tooltip_voz"),
                         on_click=busca_voz,
                     ),
-                    ft.Button("Garimpar", bgcolor="#9D4EDD",
+                    ft.Button(tx("garimpar"), bgcolor="#9D4EDD",
                               color="white", on_click=garimpar),
                 ]
             ),
@@ -3800,7 +3952,7 @@ def main(page):
                     extra_selo="SUPER")
     aba_descontos = ft.Column(
         [
-            ft.Text("Promoções agressivas selecionadas pela JDS", color="#EDEDED"),
+            ft.Text(tx("promo_jds"), color="#EDEDED"),
             grade_descontos,
         ],
         spacing=12,
@@ -3812,12 +3964,12 @@ def main(page):
     aba_desejos = ft.Column(
         [
             ft.Text(
-                "Aviso no app se o preço cair. Precisa do JDS aberto. Checagem a cada 15 min.",
+                tx("aviso_desejos"),
                 color="#EDEDED",
                 size=13,
             ),
             ft.Button(
-                "Verificar preços agora",
+                tx("verificar_agora"),
                 bgcolor="#9D4EDD",
                 color="white",
                 on_click=verificar_desejos,
@@ -3831,10 +3983,10 @@ def main(page):
 
     aba_achados = ft.Column(
         [
-            ft.Text("Cole um link. A JDS Economiza trata o rastreio em segundo plano.",
+            ft.Text(tx("cole_rastreio"),
                     color="#EDEDED", size=13),
             txt_achado,
-            ft.Button("Validar achado", bgcolor="#9D4EDD",
+            ft.Button(tx("validar"), bgcolor="#9D4EDD",
                       color="white", on_click=converter_achado),
             lista_achados,
         ],
@@ -3848,10 +4000,10 @@ def main(page):
             lbl_pontos,
             btn_checkin,
             ft.Divider(color="#2A2A2E"),
-            ft.Text("Roleta da Sorte semanal", color="#FFD700",
+            ft.Text(tx("roleta_titulo"), color="#FFD700",
                     weight=ft.FontWeight.BOLD),
             lbl_roleta,
-            ft.Button("Girar roleta", bgcolor="#00F5D4",
+            ft.Button(tx("girar"), bgcolor="#00F5D4",
                       color="#121214", on_click=girar_roleta),
         ],
         spacing=14,
@@ -3871,11 +4023,11 @@ def main(page):
                     unselected_label_color="#888888",
                     indicator_color="#9D4EDD",
                     tabs=[
-                        ft.Tab(label="🔍 Garimpar"),
-                        ft.Tab(label="🔥 Super Descontos"),
-                        ft.Tab(label="⭐ Lista de Desejos"),
-                        ft.Tab(label="👥 Achados"),
-                        ft.Tab(label="🎰 Recompensas"),
+                        ft.Tab(label=tx("tab_garimpar")),
+                        ft.Tab(label=tx("tab_descontos")),
+                        ft.Tab(label=tx("tab_desejos")),
+                        ft.Tab(label=tx("tab_achados")),
+                        ft.Tab(label=tx("tab_recompensas")),
                     ],
                 ),
                 ft.TabBarView(
@@ -4270,6 +4422,14 @@ def executar_testes_unitarios():
     checar(f"tag={ID_AMAZON}" in sujo and "outra-20" not in sujo, "Amazon troca tag de terceiro pela JDS")
     import inspect as _insp
     checar("pais" in _insp.signature(buscar_ofertas_jds).parameters, "app envia pais BR/US para a API")
+    checar(pais_pelo_idioma("pt") == "BR" and pais_pelo_idioma("pt-BR") == "BR",
+           "locale pt vira mercado BR")
+    checar(pais_pelo_idioma("en") == "US" and pais_pelo_idioma("en-US") == "US"
+           and pais_pelo_idioma("es") == "US",
+           "qualquer idioma que não seja pt vira US")
+    checar(texto_app("nenhuma_oferta", "US") == "No products found"
+           and texto_app("ver_oferta", "US") == "View Deal",
+           "tela US usa textos em inglês")
     checar(
         f"identity={ID_MERCADO_LIVRE}" in _aplicar_afiliado_google(
             "https://www.mercadolivre.com.br/x/p/MLB1", "mercado_livre"
