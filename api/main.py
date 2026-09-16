@@ -122,6 +122,8 @@ def health():
             )),
             "serper": bool(_chaves_env("SERPER_API_KEY", "SERPER_KEY")),
             "app_token": bool((os.environ.get("JDS_API_TOKEN") or "").strip()),
+            "cache_sqlite": True,
+            "cache_ttl_horas": 2,
         },
     }
 

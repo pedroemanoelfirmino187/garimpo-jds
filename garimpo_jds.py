@@ -12,6 +12,8 @@ import re
 import subprocess
 import sys
 import urllib.parse
+import sqlite3
+import threading
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -190,9 +192,11 @@ def serializar_lista_app(lista, pais="BR"):
 ASIN_DUALSENSE = "B0CQKLS4RP"
 CUPOM_JDS = "JDS10"
 CACHE_GARIMPO = Path(__file__).resolve().parent / "cache_garimpo.json"
+CACHE_GARIMPO_DB = Path(__file__).resolve().parent / "cache_garimpo.db"
 ARQ_DESEJOS = Path(__file__).resolve().parent / "desejos_jds.json"
 ARQ_PONTOS = Path(__file__).resolve().parent / "pontos_jds.json"
-CACHE_TTL_SEG = 6 * 3600
+CACHE_TTL_SEG = 2 * 3600
+_CACHE_LOCK = threading.Lock()
 INTERVALO_ALERTA_SEG = 15 * 60
 JDS_API_URL = (os.environ.get("JDS_API_URL") or "").strip().rstrip("/")
 FOTO_PADRAO = "https://images.unsplash.com/photo-1544816155-12df9643f363?w=600&auto=format&fit=crop&q=80"
@@ -1490,44 +1494,101 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v15:" + pais + ":" + re.sub(r"\s+", " ", (termo or "").strip().lower())
+    return "v15:" + pais + ":" + _termo_cache_norm(termo)
+
+
+def _termo_cache_norm(termo):
+    return re.sub(r"\s+", " ", (termo or "").strip().lower())
+
+
+def _arquivo_cache_sqlite():
+    extra = (os.environ.get("CACHE_GARIMPO_DB") or "").strip()
+    if extra:
+        return Path(extra)
+    return CACHE_GARIMPO_DB
+
+
+def _conectar_cache_sqlite():
+    caminho = _arquivo_cache_sqlite()
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(caminho), timeout=12)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS buscas (
+            termo TEXT NOT NULL,
+            pais TEXT NOT NULL,
+            json TEXT NOT NULL,
+            criado_em REAL NOT NULL,
+            PRIMARY KEY (termo, pais)
+        )
+        """
+    )
+    return conn
 
 
 def _ler_cache_garimpo(termo, pais="BR"):
-    chave = _chave_cache(termo, pais=pais)
-    if not chave or not CACHE_GARIMPO.exists():
+    """Consulta SQLite antes da Serper. Válido por 2h, separado por termo+país."""
+    termo_n = _termo_cache_norm(termo)
+    pais = _normalizar_pais(pais)
+    if not termo_n:
         return None
+    agora = time.time()
     try:
-        dados = json.loads(CACHE_GARIMPO.read_text(encoding="utf-8"))
-        item = dados.get(chave)
-        if not item:
+        with _CACHE_LOCK:
+            conn = _conectar_cache_sqlite()
+            try:
+                row = conn.execute(
+                    "SELECT json, criado_em FROM buscas WHERE termo = ? AND pais = ?",
+                    (termo_n, pais),
+                ).fetchone()
+            finally:
+                conn.close()
+        if not row:
             return None
-        if time.time() - float(item.get("quando", 0)) > CACHE_TTL_SEG:
+        blob, quando = row
+        if agora - float(quando or 0) > CACHE_TTL_SEG:
             return None
-        produtos = item.get("produtos") or None
-        if not produtos:
+        produtos = json.loads(blob)
+        if not isinstance(produtos, list) or not produtos:
             return None
-        validos = [p for p in produtos if _oferta_foto_preco_do_mesmo_item(p)]
+        validos = [p for p in produtos if isinstance(p, dict)]
         return validos or None
-    except Exception:
+    except Exception as e:
+        print(f"[Cache SQLite] leitura: {e}")
         return None
 
 
 def _gravar_cache_garimpo(termo, produtos, pais="BR"):
-    chave = _chave_cache(termo, pais=pais)
-    if not chave:
+    """Salva o JSON da busca (termo + país) para não gastar Serper de novo em 2h."""
+    termo_n = _termo_cache_norm(termo)
+    pais = _normalizar_pais(pais)
+    if not termo_n or not produtos:
         return
-    dados = {}
-    if CACHE_GARIMPO.exists():
-        try:
-            dados = json.loads(CACHE_GARIMPO.read_text(encoding="utf-8"))
-        except Exception:
-            dados = {}
-    dados[chave] = {"quando": time.time(), "produtos": produtos}
+    agora = time.time()
     try:
-        CACHE_GARIMPO.write_text(json.dumps(dados, ensure_ascii=False), encoding="utf-8")
+        payload = json.dumps(list(produtos), ensure_ascii=False)
+        with _CACHE_LOCK:
+            conn = _conectar_cache_sqlite()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO buscas (termo, pais, json, criado_em)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(termo, pais) DO UPDATE SET
+                        json = excluded.json,
+                        criado_em = excluded.criado_em
+                    """,
+                    (termo_n, pais, payload, agora),
+                )
+                conn.execute(
+                    "DELETE FROM buscas WHERE criado_em < ?",
+                    (agora - CACHE_TTL_SEG,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
     except Exception as e:
-        print(f"[Cache] não gravou: {e}")
+        print(f"[Cache SQLite] gravação: {e}")
 
 
 def _buscar_ofertas_ml_api(termo, limite=8):
@@ -2803,23 +2864,31 @@ def gerar_lista_ofertas_reais(
 
 
 def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, limite=20):
-    """Entrada da API: BR = Amazon/ML/Shopee; US = Amazon/eBay via Serper."""
+    """Entrada da API: SQLite 2h (termo+país) antes de gastar Serper."""
     termo = (termo or "").strip()
     pais = _normalizar_pais(pais)
     if not termo:
         return []
+    if usar_cache:
+        cached = _ler_cache_garimpo(termo, pais=pais)
+        if cached:
+            print(f"[Cache SQLite] hit {_chave_cache(termo, pais=pais)}")
+            return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(cached, pais=pais))
     if pais == "US":
         ofertas = buscar_ofertas_serper_shopping(
-            termo, usar_cache=usar_cache, limite=limite, pais="US",
+            termo, usar_cache=False, limite=limite, pais="US",
         )
         ofertas = _completar_lojas_serper(termo, ofertas, limite=limite, pais="US")
         ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais="US"))
         if ofertas and usar_cache:
             _gravar_cache_garimpo(termo, ofertas, pais="US")
         return ofertas
-    return gerar_lista_ofertas_reais(
-        termo, usar_cache=usar_cache, usar_vivo=usar_vivo, pais="BR",
+    ofertas = gerar_lista_ofertas_reais(
+        termo, usar_cache=False, usar_vivo=usar_vivo, pais="BR",
     )
+    if ofertas and usar_cache:
+        _gravar_cache_garimpo(termo, ofertas, pais="BR")
+    return ofertas
 
 
 def buscar_ofertas_jds(termo, pais="BR"):
@@ -3935,6 +4004,23 @@ def executar_testes_unitarios():
     ], pais="BR")
     checar(lista_ord[0]["titulo"] == "A" and lista_ord[0]["preco_numerico"] == 40.0,
            "lista do app ordena pelo preco_numerico")
+    import tempfile as _tmp
+    _db = Path(_tmp.mkdtemp()) / "cache_teste.db"
+    os.environ["CACHE_GARIMPO_DB"] = str(_db)
+    amostra = [{
+        "titulo": "DualSense cache",
+        "preco_num": 404.27,
+        "url": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+        "foto": "https://m.media-amazon.com/images/I/dual.jpg",
+        "plataforma": "amazon",
+        "fonte": "google",
+    }]
+    _gravar_cache_garimpo("controle ps5", amostra, pais="BR")
+    hit_br = _ler_cache_garimpo("Controle  PS5", pais="BR")
+    hit_us = _ler_cache_garimpo("controle ps5", pais="US")
+    checar(hit_br and hit_br[0]["titulo"] == "DualSense cache", "SQLite acerta termo+país BR em 2h")
+    checar(not hit_us, "SQLite não mistura busca BR com US")
+    os.environ.pop("CACHE_GARIMPO_DB", None)
     checar(not _preco_plausivel(
         "controle ps5", 292.78,
         "PlayStation DualSense Controle sem fio",
