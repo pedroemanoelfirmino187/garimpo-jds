@@ -522,14 +522,24 @@ def gerar_link_afiliado(url_original, plataforma):
         return url_original
 
 
-def _limpar_preco_serper(texto):
-    """R$ 1.799,00 → 1799.00: tira R$, espaço, pontos e troca vírgula por ponto."""
+def _limpar_preco_serper(texto, pais="BR"):
+    """BR: R$ 1.799,00 → 1799.00. US: $62.00 → 62.00 (não apaga o ponto decimal)."""
     if texto is None:
         return 0.0
     if isinstance(texto, (int, float)):
         n = float(texto)
         return n if n > 0 else 0.0
-    s = str(texto).replace("R$", "").replace("r$", "").replace("$", "")
+    bruto = str(texto).strip()
+    if not bruto:
+        return 0.0
+    us = (
+        _normalizar_pais(pais) == "US"
+        or ("$" in bruto and "R$" not in bruto.upper())
+    )
+    if us:
+        n = _preco_para_numero(bruto, pais="US")
+        return n if n > 0 else 0.0
+    s = bruto.replace("R$", "").replace("r$", "").replace("$", "")
     s = s.replace(" ", "").replace(".", "").replace(",", ".")
     s = re.sub(r"[^\d.]", "", s)
     if not s or s == ".":
@@ -541,9 +551,9 @@ def _limpar_preco_serper(texto):
         return 0.0
 
 
-def _preco_serper_para_float(texto):
-    """Converte 'R$ 1.799,00' em 1799.00 — tira R$, milhar e vírgula."""
-    return _limpar_preco_serper(texto)
+def _preco_serper_para_float(texto, pais="BR"):
+    """Converte texto de preço Serper em float no formato do país."""
+    return _limpar_preco_serper(texto, pais=pais)
 
 
 def _source_loja_oficial(source, pais="BR"):
@@ -671,6 +681,23 @@ def _anuncio_veio_do_google(produto):
     return fonte in {"google", "scrape", "oficial"}
 
 
+def _url_canonica_loja(url, plat, pais="BR"):
+    """Normaliza para a página do produto quando dá para extrair o ID."""
+    href = (url or "").strip()
+    pais = _normalizar_pais(pais)
+    if plat == "amazon":
+        asin = _asin_amazon(href)
+        if asin:
+            if pais == "US" or _host_amazon_eua(href):
+                return f"https://www.amazon.com/dp/{asin}"
+            return f"https://www.amazon.com.br/dp/{asin}"
+    if plat == "ebay":
+        itm = re.search(r"/itm/(?:[^/?#]+/)?(\d{9,})", href)
+        if itm:
+            return f"https://www.ebay.com/itm/{itm.group(1)}"
+    return href
+
+
 def _url_anuncio_exato(url, plat):
     """True só para página do anúncio (não busca da loja)."""
     u = (url or "").lower()
@@ -698,6 +725,7 @@ def _link_compra_do_card(produto):
     q = _consulta_do_card(produto)
     if fonte == "busca_loja":
         return aplicar_afiliado_por_dominio(url) if url.startswith("http") else url
+    url = _url_canonica_loja(url, plat, pais=pais)
     if _url_anuncio_exato(url, plat) and fonte != "catalogo":
         return aplicar_afiliado_por_dominio(url)
     if plat == "amazon" and _asin_amazon(url) == ASIN_DUALSENSE:
@@ -794,7 +822,14 @@ def _eh_pagina_compra(url, plat):
 
 
 def _asin_amazon(url):
-    achado = re.search(r"(?:/dp/|/gp/product/)([A-Z0-9]{10})", url or "", re.I)
+    achado = re.search(
+        r"(?:/dp/|/gp/product/|/gp/aw/d/|/product/)([A-Z0-9]{10})",
+        url or "",
+        re.I,
+    )
+    if achado:
+        return achado.group(1).upper()
+    achado = re.search(r"[?&]asin=([A-Z0-9]{10})\b", url or "", re.I)
     return achado.group(1).upper() if achado else ""
 
 
@@ -886,7 +921,11 @@ def _oferta_foto_preco_do_mesmo_item(item):
         preco = float(item.get("preco_num") or 0)
     except (TypeError, ValueError):
         return False
-    if preco <= 0 or _foto_e_generica(foto):
+    if preco <= 0:
+        return False
+    if _url_anuncio_exato(url, plat):
+        return True
+    if _foto_e_generica(foto):
         return False
     if not _eh_link_produto(url, plat):
         return False
@@ -910,7 +949,8 @@ def _oferta_foto_preco_do_mesmo_item(item):
 
 def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NOVO", pais="BR"):
     pais = _normalizar_pais(pais)
-    if _eh_pagina_compra(url, plat):
+    url = _url_canonica_loja(url, plat, pais=pais)
+    if _url_anuncio_exato(url, plat) or (_eh_pagina_compra(url, plat) and "orderid_price" not in (url or "").lower() and "/s?" not in (url or "").lower() and "shopee.com.br/search" not in (url or "").lower()):
         url_final = _aplicar_afiliado_google(url, plat, pais=pais)
     elif plat == "shopee":
         url_final = _link_busca_shopee(titulo)
@@ -919,7 +959,7 @@ def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NO
     elif plat == "mercado_livre":
         url_final = _link_busca_ml(titulo)
     elif plat == "ebay":
-        url_final = url if _eh_link_produto(url, "ebay") else _link_busca_ebay(titulo)
+        url_final = url if _url_anuncio_exato(url, "ebay") else _link_busca_ebay(titulo)
     else:
         url_final = _aplicar_afiliado_google(url, plat, pais=pais)
     foto_final = _foto_da_oferta(url_final, plat, foto) or _foto_da_oferta(url, plat, foto)
@@ -1107,6 +1147,10 @@ def _parece_acessorio_barato(titulo, termo=""):
         )
     ):
         return True
+    if any(k in tl for k in ("airpods", "airpod")) and any(
+        x in t for x in ("charging case only", "case only", "ear tips", "capa para airpods")
+    ):
+        return True
     return any(
         p in t for p in (
             "capa de", "capa para", " capa", "skin", "adesivo", "pelicula",
@@ -1119,6 +1163,24 @@ def _parece_acessorio_barato(titulo, termo=""):
     )
 
 
+def _faixa_preco(termo, pais="BR"):
+    """Piso e teto para recusar acessório barato e preço 100x (parse)."""
+    t = (termo or "").lower()
+    us = _normalizar_pais(pais) == "US"
+    if any(k in t for k in ("dualsense", "ps5", "playstation", "xbox", "controle")):
+        return (35.0, 280.0) if us else (320.0, 1600.0)
+    if any(k in t for k in ("airpods", "airpod")):
+        return (45.0, 450.0) if us else (250.0, 2500.0)
+    if "iphone" in t:
+        return (180.0, 2500.0) if us else (1200.0, 12000.0)
+    if any(k in t for k in ("redmi", "xiaomi", "galaxy", "smartphone", "celular")):
+        return (80.0, 1600.0) if us else (449.0, 8000.0)
+    base = float(_obter_preco_base_categoria(termo) or 40)
+    if us:
+        return (max(5.0, base * 0.08), max(800.0, base * 3))
+    return (max(8.0, base * 0.25), max(base * 8, 500.0))
+
+
 def _preco_plausivel(termo, preco, titulo, pais="BR"):
     try:
         preco = float(preco)
@@ -1128,19 +1190,28 @@ def _preco_plausivel(termo, preco, titulo, pais="BR"):
         return False
     if _parece_acessorio_barato(titulo, termo):
         return False
-    piso = max(8.0, _obter_preco_base_categoria(termo) * 0.25)
     tlow = (termo or "").lower()
+    piso, teto = _faixa_preco(termo, pais=pais)
     if any(k in tlow for k in ("cabo", "carregador")):
-        piso = 5.0
-    if any(k in tlow for k in ("dualsense", "ps5", "playstation", "xbox")):
-        piso = max(piso, 320.0)
-    if any(k in tlow for k in ("smartphone", "celular")):
-        piso = max(piso, 199.0)
-    if any(k in tlow for k in ("redmi", "iphone", "xiaomi", "galaxy")):
-        piso = max(piso, 449.0)
-    if _normalizar_pais(pais) == "US":
-        piso = 1.0
-    return preco >= piso
+        piso = 5.0 if _normalizar_pais(pais) == "US" else 5.0
+        teto = max(teto, 200.0)
+    return piso <= preco <= teto
+
+
+def _normalizar_preco_mercado(n, termo, titulo, pais="BR"):
+    """Se o parse inflou 100x ($62.00 → 6200), tenta o valor real."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return 0.0
+    if n <= 0:
+        return 0.0
+    if _preco_plausivel(termo, n, titulo, pais=pais):
+        return n
+    cand = round(n / 100.0, 2)
+    if cand > 0 and _preco_plausivel(termo, cand, titulo, pais=pais):
+        return cand
+    return 0.0
 
 
 def _raspar_cards_mercado_livre(termo_busca, limite=6):
@@ -1761,7 +1832,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v16:" + pais + ":" + _termo_cache_norm(termo)
+    return "v17:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2239,27 +2310,36 @@ def _item_google(termo, titulo, preco, href, foto, plat, origem="", pais="BR"):
     pais = _normalizar_pais(pais)
     if not plat:
         plat = _plataforma_loja(href) or _loja_do_texto(titulo)
-    if not plat or preco <= 0:
+    if not plat:
         return None
     if plat not in _lojas_do_pais(pais):
         return None
-    if pais == "US" and plat == "amazon" and not _host_amazon_eua(href) and href:
+    if pais == "US" and plat == "amazon":
+        if href and "amazon.com.br" in href.lower():
+            return None
+        if href and not _host_amazon_eua(href):
+            asin = _asin_amazon(href)
+            href = f"https://www.amazon.com/dp/{asin}" if asin else ""
+    preco = _normalizar_preco_mercado(preco, termo, titulo, pais=pais)
+    if preco <= 0:
         return None
+    href = _url_canonica_loja(href, plat, pais=pais)
     if _parece_artigo_nao_produto(titulo) or _parece_url_conteudo(href):
         return None
     if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo, pais=pais):
         return None
-    if not href or not _eh_link_produto(href, plat):
-        if plat == "amazon":
-            href = _link_busca_amazon_us(termo) if pais == "US" else _link_busca_amazon(termo)
-        elif plat == "mercado_livre":
-            href = _link_busca_ml(termo)
-        elif plat == "shopee":
-            href = _link_busca_shopee(termo)
-        elif plat == "ebay":
-            href = _link_busca_ebay(termo)
-        else:
-            return None
+    if not _url_anuncio_exato(href, plat):
+        if not href or not _eh_link_produto(href, plat):
+            if plat == "amazon":
+                href = _link_busca_amazon_us(termo) if pais == "US" else _link_busca_amazon(termo)
+            elif plat == "mercado_livre":
+                href = _link_busca_ml(termo)
+            elif plat == "shopee":
+                href = _link_busca_shopee(termo)
+            elif plat == "ebay":
+                href = _link_busca_ebay(termo)
+            else:
+                return None
     foto = (foto or "").strip()
     if foto.startswith("//"):
         foto = "https:" + foto
@@ -2401,7 +2481,7 @@ def _preco_item_serper(it, pais="BR"):
                 return n
         except (TypeError, ValueError):
             pass
-    return _limpar_preco_serper(it.get("price") or it.get("snippet") or "")
+    return _limpar_preco_serper(it.get("price") or it.get("snippet") or "", pais=pais)
 
 
 def _href_item_serper(it):
@@ -2420,11 +2500,17 @@ def _guardar_melhor_loja(ofertas, item):
     if not item:
         return ofertas
     plat = item.get("plataforma")
+
+    def _rank(p):
+        href = p.get("url") or ""
+        exato = 0 if _url_anuncio_exato(href, p.get("plataforma")) else 1
+        return (exato, float(p.get("preco_num") or 9e9))
+
     atual = next((p for p in ofertas if p.get("plataforma") == plat), None)
     if atual is None:
         ofertas.append(item)
         return ofertas
-    if item.get("preco_num", 9e9) < atual.get("preco_num", 9e9):
+    if _rank(item) < _rank(atual):
         return [p for p in ofertas if p.get("plataforma") != plat] + [item]
     return ofertas
 
@@ -3123,6 +3209,13 @@ def gerar_lista_ofertas_reais(
             _adicionar(item)
             if len(lista_produtos) > antes:
                 plats_ja.add(item.get("plataforma"))
+        plats_ja = {p.get("plataforma") for p in lista_produtos}
+        if len(plats_ja) < len(_lojas_do_pais(pais)):
+            for item in _completar_lojas_serper(termo, list(lista_produtos), limite=8, pais=pais):
+                antes = len(lista_produtos)
+                _adicionar(item)
+                if len(lista_produtos) > antes:
+                    plats_ja.add(item.get("plataforma"))
         if pais == "BR" and len(plats_ja) < 3:
             for item in _coletar_ofertas_ao_vivo(termo):
                 plat = item.get("plataforma")
@@ -4150,6 +4243,29 @@ def executar_testes_unitarios():
            "preço Serper R$ 1.799,00 vira 1799.00")
     checar(abs(_limpar_preco_serper("R$ 1.799,00") - 1799.0) < 0.01,
            "limpa R$, espaço, ponto e vírgula para float")
+    checar(abs(_limpar_preco_serper("$62.00", "US") - 62.0) < 0.01,
+           "preço US $62.00 não apaga o ponto decimal")
+    checar(abs(_normalizar_preco_mercado(6200, "dualsense ps5", "DualSense", "US") - 62.0) < 0.01,
+           "preço US inflado 6200 volta para 62")
+    checar(not _preco_plausivel("airpods pro", 3.30, "Apple AirPods Pro", pais="US"),
+           "AirPods a $3.30 é recusado")
+    checar(_preco_plausivel("airpods pro", 189.0, "Apple AirPods Pro", pais="US"),
+           "AirPods Pro a $189 passa")
+    us_dp = _item_google(
+        "dualsense ps5 controller",
+        "Sony DualSense PS5 Wireless Controller",
+        62.0,
+        "https://www.amazon.com/dp/B0CQKLS4RP",
+        "https://m.media-amazon.com/images/I/d.jpg",
+        "amazon",
+        origem="serper",
+        pais="US",
+    )
+    checar(
+        us_dp and "/dp/B0CQKLS4RP" in (us_dp.get("url") or "")
+        and abs(float(us_dp.get("preco_num") or 0) - 62) < 0.01,
+        "Amazon US mantém o /dp/ e o preço em dólar",
+    )
     barato = isolar_produto_mais_barato([
         {"titulo": "Caro", "preco_num": 900.0, "url": "https://www.amazon.com.br/dp/B0CARO0000",
          "foto": "https://m.media-amazon.com/images/I/c.jpg", "plataforma": "amazon",
