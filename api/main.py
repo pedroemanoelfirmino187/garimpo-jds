@@ -30,6 +30,7 @@ from garimpo_jds import (  # noqa: E402
     ID_AMAZON_US,
     ID_MERCADO_LIVRE,
     ID_SHOPEE,
+    ultimo_diag_serper,
     _arquivo_cache_sqlite,
     _chave_cache,
     _chaves_env,
@@ -179,6 +180,7 @@ def _resposta_ofertas(termo, ofertas, pais="BR"):
             "imagem": campeao.get("imagem"),
         },
         "ofertas": lista,
+        "diagnostico": ultimo_diag_serper(),
     }
 
 

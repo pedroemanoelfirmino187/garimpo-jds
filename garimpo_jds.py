@@ -279,7 +279,7 @@ def texto_app(chave, pais="BR", **kwargs):
 def _serper_locale(pais="BR"):
     if _normalizar_pais(pais) == "US":
         return {"gl": "us", "hl": "en"}
-    return {"gl": "br", "hl": "pt-br"}
+    return {"gl": "br", "hl": "pt"}
 
 
 def _consulta_serper_shopping(termo):
@@ -1942,7 +1942,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v25:" + pais + ":" + _termo_cache_norm(termo)
+    return "v26:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2553,6 +2553,13 @@ def _parsear_ofertas_google(html, termo, origem="", limite=8):
     return ofertas[:limite]
 
 
+_ULTIMO_DIAG_SERPER = {}
+
+
+def ultimo_diag_serper():
+    return dict(_ULTIMO_DIAG_SERPER)
+
+
 def _chave_serper():
     chaves = _chaves_env("SERPER_API_KEY", "SERPER_KEY")
     return chaves[0] if chaves else ""
@@ -2801,7 +2808,7 @@ def isolar_produto_mais_barato(ofertas, pais="BR"):
 def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR"):
     """
     Cache → POST Serper Shopping → lojas do país → preço float → menor preço no topo.
-    BR: Amazon, Mercado Livre, Shopee (gl=br, hl=pt-br).
+    BR: Amazon, Mercado Livre, Shopee (gl=br, hl=pt).
     US: Amazon e eBay (gl=us, hl=en), tag Amazon EUA em todo /dp/.
     """
     t = (termo or "").strip()
@@ -2816,10 +2823,12 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
                 print(f"[Serper] cache {_chave_cache(t, pais=pais)}")
                 return lista
     chave = _chave_serper()
-    if not chave or requests is None:
-        return []
     loc = _serper_locale(pais)
     q = _consulta_serper_shopping(t)
+    if not chave or requests is None:
+        _ULTIMO_DIAG_SERPER.clear()
+        _ULTIMO_DIAG_SERPER.update({"q": q, "http": 0, "shopping": 0, "erro": "sem_chave"})
+        return []
     if not q:
         return []
     try:
@@ -2830,25 +2839,41 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
                 "Content-Type": "application/json",
             },
             json={"q": q, "gl": loc["gl"], "hl": loc["hl"], "num": min(int(limite or 20), 40)},
-            timeout=18,
+            timeout=25,
         )
-        if resp.status_code >= 400:
-            print(f"[Serper] HTTP {resp.status_code}")
+        http = resp.status_code
+        if http >= 400:
+            trecho = (resp.text or "")[:180]
+            print(f"[Serper] HTTP {http}")
+            _ULTIMO_DIAG_SERPER.clear()
+            _ULTIMO_DIAG_SERPER.update({
+                "q": q, "gl": loc["gl"], "hl": loc["hl"], "http": http,
+                "shopping": 0, "sources": [], "apos_source": 0, "ofertas": 0,
+                "erro": trecho,
+            })
             return []
         dados = resp.json() if resp.text else {}
     except Exception as e:
         print(f"[Serper] {e}")
+        _ULTIMO_DIAG_SERPER.clear()
+        _ULTIMO_DIAG_SERPER.update({"q": q, "http": 0, "shopping": 0, "erro": str(e)[:180]})
         return []
     if not isinstance(dados, dict):
         return []
+    cru = [it for it in (dados.get("shopping") or []) if isinstance(it, dict)]
+    sources = [str(it.get("source") or "") for it in cru][:15]
     shopping = [
-        it for it in (dados.get("shopping") or [])
-        if isinstance(it, dict) and _source_loja_oficial(
-            str(it.get("source") or it.get("domain") or ""), pais=pais,
-        )
+        it for it in cru
+        if _source_loja_oficial(str(it.get("source") or it.get("domain") or ""), pais=pais)
     ]
     ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite, pais=pais)
     ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
+    _ULTIMO_DIAG_SERPER.clear()
+    _ULTIMO_DIAG_SERPER.update({
+        "q": q, "gl": loc["gl"], "hl": loc["hl"], "http": http,
+        "shopping": len(cru), "sources": sources,
+        "apos_source": len(shopping), "ofertas": len(ofertas),
+    })
     if usar_cache and ofertas:
         _gravar_cache_garimpo(t, ofertas, pais=pais)
     print(f"[Serper] {len(ofertas)} ofertas filtradas ({pais}: {', '.join(_lojas_do_pais(pais))})")
@@ -4792,7 +4817,7 @@ def executar_testes_unitarios():
     loc_us = _serper_locale("US")
     loc_br = _serper_locale("BR")
     checar(loc_us == {"gl": "us", "hl": "en"}, "Serper EUA usa gl=us hl=en")
-    checar(loc_br == {"gl": "br", "hl": "pt-br"}, "Serper BR usa gl=br hl=pt-br")
+    checar(loc_br == {"gl": "br", "hl": "pt"}, "Serper BR usa gl=br hl=pt")
     checar(
         _consulta_serper_shopping("garrafa de café") == "garrafa de café"
         and _consulta_serper_shopping("bicicleta") == "bicicleta"
