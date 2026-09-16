@@ -1160,9 +1160,24 @@ def _titulo_e_acessorio_imediato(titulo):
     return False
 
 
+def _titulo_e_amostra_miniatura(termo, titulo):
+    """Whey/creatina: sachê 30g não substitui o pote da busca."""
+    t = _sem_acento(titulo or "")
+    tl = _sem_acento(termo or "")
+    if not any(k in tl for k in ("whey", "protein", "proteina", "creatina")):
+        return False
+    if any(k in tl for k in ("sache", "sachet", "30g", "amostra")):
+        return False
+    return any(
+        x in t for x in ("sache", "sachet", "amostra", "30g", "dose unica", "1 dose")
+    )
+
+
 def _titulo_shopping_ok(termo, titulo):
     """Shopping: pelo menos um token do termo; não exige o título copiar a busca inteira."""
     if _titulo_e_acessorio_imediato(titulo) or _parece_artigo_nao_produto(titulo):
+        return False
+    if _titulo_e_amostra_miniatura(termo, titulo):
         return False
     if _parece_acessorio_barato(titulo, termo):
         return False
@@ -1948,7 +1963,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v29:" + pais + ":" + _termo_cache_norm(termo)
+    return "v30:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -4715,6 +4730,11 @@ def executar_testes_unitarios():
             "Kit Capa Anti Impacto e Película De Vidro 3D",
         ),
         "peça e capa do Redmi não viram o celular",
+    )
+    checar(
+        not _titulo_shopping_ok("whey protein", "100% Whey Crush - 1 Sachê 30g Chocobear")
+        and _titulo_shopping_ok("whey protein", "100% Whey Crush 900g Under Labz"),
+        "sachê 30g de whey não substitui o pote",
     )
     mais_barato_oshop = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
         {
