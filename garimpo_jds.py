@@ -698,10 +698,43 @@ def _url_canonica_loja(url, plat, pais="BR"):
     return href
 
 
+def _url_e_busca_loja(url):
+    """True se o link é barra de pesquisa da loja (/search, ?q=, keyword=, ranking…)."""
+    bruto = (url or "").strip()
+    if not bruto:
+        return False
+    u = bruto.lower()
+    parsed = urllib.parse.urlparse(u if u.startswith("http") else "https://x/" + u.lstrip("/"))
+    path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+    host = (parsed.netloc or "").lower()
+    if "google." in host:
+        return "/search" in path
+    if any(p in path for p in ("/search", "/sch/", "/jm/search")):
+        return True
+    if path.rstrip("/") == "/s" or path.endswith("/s/") or "/s?" in u:
+        return True
+    if "lista.mercadolivre" in host or "listado.mercadolivre" in host or "listado.mercadolibre" in host:
+        return True
+    if "orderid_price" in u:
+        return True
+    if "price-asc-rank" in u or "ranking" in query:
+        return True
+    qs = urllib.parse.parse_qs(parsed.query)
+    chaves_busca = {"keyword", "keywords", "k", "_nkw", "q"}
+    if any(k in qs for k in chaves_busca):
+        if any(x in path for x in ("/dp/", "/gp/product/", "/p/", "/itm/", "-i.")):
+            return False
+        return True
+    return False
+
+
 def _url_anuncio_exato(url, plat):
     """True só para página do anúncio (não busca da loja)."""
     u = (url or "").lower()
     if not u.startswith("http"):
+        return False
+    if _url_e_busca_loja(url):
         return False
     if plat == "amazon":
         return bool(_asin_amazon(url))
@@ -717,7 +750,7 @@ def _url_anuncio_exato(url, plat):
 
 
 def _link_compra_do_card(produto):
-    """Ver Oferta: anúncio direto do produto mais barato e exato; busca só se não houver link."""
+    """Ver Oferta: anúncio direto do produto. Busca da loja só em catálogo/fallback."""
     plat = (produto or {}).get("plataforma")
     url = (produto or {}).get("url") or (produto or {}).get("link_afiliado") or ""
     pais = _normalizar_pais((produto or {}).get("pais") or "BR")
@@ -725,6 +758,9 @@ def _link_compra_do_card(produto):
     q = _consulta_do_card(produto)
     if fonte == "busca_loja":
         return aplicar_afiliado_por_dominio(url) if url.startswith("http") else url
+    url = _desempacotar_link_google(url) or url
+    if _url_e_busca_loja(url):
+        url = ""
     url = _url_canonica_loja(url, plat, pais=pais)
     if _url_anuncio_exato(url, plat) and fonte != "catalogo":
         return aplicar_afiliado_por_dominio(url)
@@ -734,6 +770,10 @@ def _link_compra_do_card(produto):
         return _aplicar_afiliado_google(
             f"https://www.amazon.com.br/dp/{ASIN_DUALSENSE}", "amazon",
         )
+    if fonte != "catalogo":
+        if _url_anuncio_exato(url, plat):
+            return aplicar_afiliado_por_dominio(url)
+        return aplicar_afiliado_por_dominio(url) if url.startswith("http") and not _url_e_busca_loja(url) else ""
     if pais == "US":
         if plat == "amazon":
             return aplicar_tag_amazon_eua(url or _link_busca_amazon_us(q))
@@ -758,7 +798,10 @@ def _link_ver_oferta(produto):
     if fonte == "catalogo":
         return _link_compra_do_card(p)
     for bruto in (p.get("url"), p.get("link"), p.get("link_afiliado")):
-        can = _url_canonica_loja((bruto or "").strip(), plat, pais=pais)
+        h = _desempacotar_link_google((bruto or "").strip()) or (bruto or "").strip()
+        if _url_e_busca_loja(h):
+            continue
+        can = _url_canonica_loja(h, plat, pais=pais)
         if _url_anuncio_exato(can, plat):
             return aplicar_afiliado_por_dominio(can)
     return _link_compra_do_card(p)
@@ -769,30 +812,7 @@ def _nome_loja(plataforma):
 
 
 def _eh_link_produto(url, plataforma):
-    u = (url or "").lower()
-    if not u.startswith("http"):
-        return False
-    if plataforma == "amazon":
-        return "amazon." in u and ("/dp/" in u or "/gp/product/" in u or "/s?" in u)
-    if plataforma == "mercado_livre":
-        if _parece_url_conteudo(u):
-            return False
-        return (
-            "/p/" in u
-            or "/mlb" in u
-            or "produto.mercadolivre." in u
-            or "produto.mercadolibre." in u
-            or "lista.mercadolivre." in u
-            or "listado.mercadolivre." in u
-            or "listado.mercadolibre." in u
-            or "orderid_price" in u
-            or "/jm/search" in u
-        )
-    if plataforma == "shopee":
-        return "shopee.com.br/search" in u or "-i." in u or "/product/" in u
-    if plataforma == "ebay":
-        return "ebay." in u and ("/itm/" in u or "/sch/" in u or "/i/" in u)
-    return False
+    return _url_anuncio_exato(url, plataforma)
 
 
 def _extrair_foto(img_tag):
@@ -1888,7 +1908,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v21:" + pais + ":" + _termo_cache_norm(termo)
+    return "v22:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2384,18 +2404,8 @@ def _item_google(termo, titulo, preco, href, foto, plat, origem="", pais="BR"):
         return None
     if not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo, pais=pais):
         return None
-    if not _url_anuncio_exato(href, plat):
-        if not href or not _eh_link_produto(href, plat):
-            if plat == "amazon":
-                href = _link_busca_amazon_us(termo) if pais == "US" else _link_busca_amazon(termo)
-            elif plat == "mercado_livre":
-                href = _link_busca_ml(termo)
-            elif plat == "shopee":
-                href = _link_busca_shopee(termo)
-            elif plat == "ebay":
-                href = _link_busca_ebay(termo)
-            else:
-                return None
+    if _url_e_busca_loja(href) or not _url_anuncio_exato(href, plat):
+        return None
     foto = (foto or "").strip()
     if foto.startswith("//"):
         foto = "https:" + foto
@@ -2544,44 +2554,70 @@ def _preco_item_serper(it, pais="BR"):
     return 0.0
 
 
+def _urls_do_item_serper(obj, skip_keys, profundidade=0):
+    """Strings http deste item (não do snippet), inclusive dict do lojista."""
+    if profundidade > 6 or obj is None:
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in skip_keys:
+                continue
+            yield from _urls_do_item_serper(v, skip_keys, profundidade + 1)
+        return
+    if isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _urls_do_item_serper(v, skip_keys, profundidade + 1)
+        return
+    if isinstance(obj, str) and obj.strip():
+        s = obj.strip()
+        if "http" in s.lower() or s.startswith("/url?") or s.startswith("/aclk?"):
+            yield s
+
+
 def _href_item_serper(it):
-    """Link só deste bloco, da mesma loja do source — prefere /dp/ /p/ /itm."""
+    """Ignora /search ?q= keyword= ranking; usa productLink/merchant do mesmo bloco."""
     if not isinstance(it, dict):
         return ""
     plat_src = _loja_do_texto(str(it.get("source") or it.get("domain") or ""))
+    skip = {"snippet", "title", "price", "imageUrl", "image"}
+    prioridade = ("productLink", "merchantLink", "merchantUrl", "offerLink", "link", "url")
     candidatos = []
-    chaves = ("link", "productLink", "merchantLink", "url")
-    for k in chaves:
+    for k in prioridade:
         bruto = it.get(k)
-        if not isinstance(bruto, str) or not bruto.strip():
+        if isinstance(bruto, dict):
+            for s in _urls_do_item_serper(bruto, skip):
+                candidatos.append(s)
             continue
-        h = _desempacotar_link_google(bruto.strip())
-        if h:
-            candidatos.append(h.split("#")[0])
-    for k, v in it.items():
-        if k in chaves or k in {"snippet", "title", "price", "imageUrl", "image", "source"}:
-            continue
-        if not isinstance(v, str) or "http" not in v.lower():
-            continue
-        h = _desempacotar_link_google(v.strip())
-        if h:
-            candidatos.append(h.split("#")[0])
+        if isinstance(bruto, str) and bruto.strip():
+            candidatos.append(bruto.strip())
+    for s in _urls_do_item_serper(it, set(skip) | set(prioridade)):
+        candidatos.append(s)
 
-    def _ok(h):
+    resolvidos = []
+    vistos = set()
+    for bruto in candidatos:
+        h = _desempacotar_link_google(bruto)
+        if not h:
+            continue
+        h = h.split("#")[0]
+        if _url_e_busca_loja(h):
+            continue
         plat = _plataforma_loja(h)
         if not plat:
-            return False
+            continue
         if plat_src and plat != plat_src:
-            return False
-        return True
-
-    validos = [h for h in candidatos if _ok(h)]
-    if not validos:
+            continue
+        if h in vistos:
+            continue
+        vistos.add(h)
+        resolvidos.append(h)
+    if not resolvidos:
         return ""
-    validos.sort(
+    resolvidos.sort(
         key=lambda h: (0 if _url_anuncio_exato(h, _plataforma_loja(h)) else 1)
     )
-    return validos[0]
+    melhor = resolvidos[0]
+    return melhor if _url_anuncio_exato(melhor, _plataforma_loja(melhor)) else ""
 
 
 def _bloco_serper_isolado(it):
@@ -4443,6 +4479,42 @@ def executar_testes_unitarios():
         and "/dp/B0CQKLS4RP" in (busca_vs_anuncio[0].get("url") or "")
         and not any(p.get("plataforma") == "mercado_livre" for p in busca_vs_anuncio),
         "lista do ML não vence o /dp/ da Amazon",
+    )
+    checar(
+        _url_e_busca_loja("https://www.amazon.com.br/s?k=controle+ps5&s=price-asc-rank")
+        and _url_e_busca_loja("https://shopee.com.br/search?keyword=controle+ps5")
+        and _url_e_busca_loja("https://lista.mercadolivre.com.br/controle-ps5_OrderId_PRICE")
+        and not _url_e_busca_loja("https://www.amazon.com.br/dp/B0CQKLS4RP"),
+        "detecta /search ?q= keyword= ranking e ignora /dp/",
+    )
+    href_alt = _href_item_serper({
+        "title": "PlayStation DualSense Controle sem fio PS5",
+        "source": "Amazon.com.br",
+        "price": "R$ 420,00",
+        "link": "https://www.amazon.com.br/s?k=controle+de+ps5&s=price-asc-rank",
+        "productLink": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+        "merchant": {"name": "Amazon.com.br", "link": "https://www.amazon.com.br/dp/B0CQKLS4RP"},
+    })
+    checar(
+        "/dp/B0CQKLS4RP" in href_alt and "/s?" not in href_alt,
+        "Serper busca vira o link direto do lojista no mesmo JSON",
+    )
+    oferta_alt = _ofertas_de_itens_serper("controle ps5", [{
+        "title": "PlayStation DualSense Controle sem fio PS5",
+        "source": "Amazon.com.br",
+        "price": "R$ 420,00",
+        "link": "https://www.amazon.com.br/s?k=controle+de+ps5&s=price-asc-rank",
+        "productLink": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+        "imageUrl": "https://m.media-amazon.com/images/I/dual.jpg",
+    }])
+    checar(oferta_alt, "oferta com productLink entra no ranking")
+    ver_alt = _link_ver_oferta(oferta_alt[0])
+    checar(
+        "/dp/B0CQKLS4RP" in ver_alt
+        and "/s?" not in ver_alt
+        and "keyword=" not in ver_alt
+        and "price-asc-rank" not in ver_alt,
+        "Ver Oferta abre o anúncio, não a busca da loja",
     )
     checar(_source_loja_oficial("Amazon.com.br") and _source_loja_oficial("MERCADO LIVRE"),
            "filtro source aceita Amazon e Mercado Livre")
