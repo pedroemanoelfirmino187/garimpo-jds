@@ -726,13 +726,16 @@ def _url_e_busca_loja(url):
         return True
     if "orderid_price" in u:
         return True
-    if "price-asc-rank" in u or "ranking" in query:
+    if "price-asc-rank" in u:
         return True
     qs = urllib.parse.parse_qs(parsed.query)
-    chaves_busca = {"keyword", "keywords", "k", "_nkw", "q"}
-    if any(k in qs for k in chaves_busca):
+    if any(k in qs for k in ("keyword", "keywords", "_nkw")):
         if any(x in path for x in ("/dp/", "/gp/product/", "/p/", "/itm/", "-i.")):
             return False
+        return True
+    if ("k" in qs or "q" in qs) and (
+        path.rstrip("/") == "/s" or "/search" in path or "/sch/" in path
+    ):
         return True
     return False
 
@@ -865,9 +868,10 @@ def _eh_pagina_compra(url, plat):
 
 
 def _asin_amazon(url):
+    h = urllib.parse.unquote(url or "")
     achado = re.search(
         r"(?:/dp/|/gp/product/|/gp/aw/d/|/product/|/images/P/)([A-Z0-9]{10})",
-        url or "",
+        h,
         re.I,
     )
     if achado:
@@ -1942,7 +1946,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v26:" + pais + ":" + _termo_cache_norm(termo)
+    return "v27:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2731,21 +2735,32 @@ def _item_serper_loja_ok(it, pais="BR"):
     }
 
 
+_ULTIMO_QUEDAS_SERPER = {}
+
+
 def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
     """Um item da lista shopping por vez: title/source/price/link daquele bloco só."""
     pais = _normalizar_pais(pais)
     ofertas = []
+    quedas = {}
+
+    def _cai(motivo):
+        quedas[motivo] = quedas.get(motivo, 0) + 1
+
     for it in itens or []:
         if not isinstance(it, dict):
             continue
         bloco = _bloco_serper_isolado(it)
         if not bloco:
+            _cai("bloco")
             continue
         titulo = bloco["title"]
         if _titulo_e_acessorio_imediato(titulo):
+            _cai("acessorio")
             continue
         src = bloco["source"]
         if not _source_loja_oficial(src, pais=pais):
+            _cai("source")
             continue
         href = _href_item_serper(it)
         if not href or _url_e_busca_loja(href):
@@ -2758,20 +2773,33 @@ def _ofertas_de_itens_serper(termo, itens, limite=8, pais="BR"):
         plat_src = _loja_do_texto(src)
         plat_link = _plataforma_loja(href)
         if plat_src and plat_link and plat_src != plat_link:
+            _cai("loja_link")
             continue
         plat = plat_src or plat_link
         if not plat or plat not in _lojas_do_pais(pais):
+            _cai("plataforma")
             continue
         if not href.startswith("http"):
+            _cai("sem_link")
             continue
         if not _titulo_shopping_ok(termo, titulo):
+            _cai("titulo")
             continue
         preco = _preco_item_serper(it, pais=pais)
+        if preco <= 0:
+            _cai("sem_preco")
+            continue
         foto = bloco["imageUrl"]
         item = _item_google(termo, titulo, preco, href, foto, plat, origem="serper", pais=pais)
-        if not item or _url_e_busca_loja(item.get("url")):
+        if not item:
+            _cai("item_google")
+            continue
+        if _url_e_busca_loja(item.get("url")):
+            _cai("busca_final")
             continue
         ofertas = _guardar_melhor_loja(ofertas, item)
+    _ULTIMO_QUEDAS_SERPER.clear()
+    _ULTIMO_QUEDAS_SERPER.update(quedas)
     ofertas.sort(key=_rank_oferta_real)
     return ofertas[:limite]
 
@@ -2873,6 +2901,16 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
         "q": q, "gl": loc["gl"], "hl": loc["hl"], "http": http,
         "shopping": len(cru), "sources": sources,
         "apos_source": len(shopping), "ofertas": len(ofertas),
+        "quedas": dict(_ULTIMO_QUEDAS_SERPER),
+        "amostra": [
+            {
+                "source": str(it.get("source") or "")[:40],
+                "title": str(it.get("title") or "")[:50],
+                "price": str(it.get("price") or ""),
+                "link": str(it.get("link") or "")[:110],
+            }
+            for it in shopping[:4]
+        ],
     })
     if usar_cache and ofertas:
         _gravar_cache_garimpo(t, ofertas, pais=pais)
