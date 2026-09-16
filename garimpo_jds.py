@@ -432,29 +432,54 @@ def _anuncio_veio_do_google(produto):
     return fonte in {"google", "scrape", "oficial"}
 
 
+def _url_anuncio_exato(url, plat):
+    """True só para página do anúncio (não busca da loja)."""
+    u = (url or "").lower()
+    if not u.startswith("http"):
+        return False
+    if plat == "amazon":
+        return bool(_asin_amazon(url))
+    if plat == "mercado_livre":
+        if _parece_url_conteudo(u):
+            return False
+        return bool(_id_mlb(url)) or "/p/" in u or "produto.mercadolivre." in u or "produto.mercadolibre." in u
+    if plat == "shopee":
+        return "-i." in u or "/product/" in u
+    if plat == "ebay":
+        return "/itm/" in u
+    return False
+
+
 def _link_compra_do_card(produto):
-    """Ver Oferta: página da loja já ordenada pelo menor preço daquele produto."""
+    """Ver Oferta: anúncio direto do produto mais barato e exato; busca só se não houver link."""
     plat = (produto or {}).get("plataforma")
-    url = (produto or {}).get("url") or ""
+    url = (produto or {}).get("url") or (produto or {}).get("link_afiliado") or ""
     pais = _normalizar_pais((produto or {}).get("pais") or "BR")
+    fonte = ((produto or {}).get("fonte") or "").lower()
     q = _consulta_do_card(produto)
+    if fonte == "busca_loja":
+        return aplicar_afiliado_por_dominio(url) if url.startswith("http") else url
+    if _url_anuncio_exato(url, plat) and fonte != "catalogo":
+        return aplicar_afiliado_por_dominio(url)
+    if plat == "amazon" and _asin_amazon(url) == ASIN_DUALSENSE:
+        if pais == "US" or _host_amazon_eua(url):
+            return aplicar_tag_amazon_eua(url)
+        return _aplicar_afiliado_google(
+            f"https://www.amazon.com.br/dp/{ASIN_DUALSENSE}", "amazon",
+        )
     if pais == "US":
         if plat == "amazon":
             return aplicar_tag_amazon_eua(url or _link_busca_amazon_us(q))
         if plat == "ebay":
             return url or _link_busca_ebay(q)
         return url
-    if plat == "amazon" and _asin_amazon(url) == ASIN_DUALSENSE:
-        return _aplicar_afiliado_google(
-            f"https://www.amazon.com.br/dp/{ASIN_DUALSENSE}", "amazon",
-        )
     if plat == "amazon":
         return _link_busca_amazon(q)
     if plat == "mercado_livre":
         return _link_busca_ml(q)
     if plat == "shopee":
         return _link_busca_shopee(_consulta_shopee(produto))
-    return _aplicar_afiliado_google(url, plat)
+    return aplicar_afiliado_por_dominio(url)
 
 
 def _nome_loja(plataforma):
@@ -518,7 +543,9 @@ def _eh_pagina_compra(url, plat):
         )
     if plat == "shopee":
         return (
-            ("shopee.com.br/search" in u and "keyword=" in u)
+            "-i." in u
+            or "/product/" in u
+            or ("shopee.com.br/search" in u and "keyword=" in u)
             or "affiliate.shopee" in u
             or "s.shopee.com.br" in u
         )
@@ -1495,7 +1522,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v15:" + pais + ":" + _termo_cache_norm(termo)
+    return "v16:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -3272,7 +3299,7 @@ def main(page):
             except Exception:
                 pass
             snack("Cupom JDS10 copiado. Cole no carrinho da loja.", "#00F5D4")
-            url_abrir = _link_compra_do_card(prod)
+            url_abrir = prod.get("link_afiliado") or _link_compra_do_card(prod)
             try:
                 await page.launch_url(url_abrir)
             except TypeError:
@@ -3860,8 +3887,15 @@ def executar_testes_unitarios():
     amz_g = next(p for p in g_ofertas if p["plataforma"] == "amazon")
     ml_g = next(p for p in g_ofertas if p["plataforma"] == "mercado_livre")
     checar("/dp/B0CQKLS4RP" in (amz_g.get("url") or ""), "Google Amazon vai para /dp/ real")
-    checar("OrderId_PRICE" in _link_compra_do_card(ml_g) and f"identity={ID_MERCADO_LIVRE}" in _link_compra_do_card(ml_g),
-           "Ver Oferta ML abre a lista do produto pelo menor preço")
+    checar(
+        "/dp/B0CQKLS4RP" in _link_compra_do_card(amz_g) and f"tag={ID_AMAZON}" in _link_compra_do_card(amz_g),
+        "Ver Oferta Amazon abre o /dp/ do produto mais barato",
+    )
+    checar(
+        "/p/MLB32344506" in _link_compra_do_card(ml_g)
+        and f"identity={ID_MERCADO_LIVRE}" in _link_compra_do_card(ml_g),
+        "Ver Oferta ML abre o anúncio /p/ do produto, não a busca",
+    )
     serper_itens = [
         {
             "title": "PlayStation DualSense Controle sem fio PS5",
@@ -4154,7 +4188,7 @@ def executar_testes_unitarios():
         "mercado_livre",
     )
     link_ml = _link_compra_do_card(ml)
-    checar("OrderId_PRICE" in link_ml, "Ver Oferta ML abre a lista pelo menor preço")
+    checar("MLB-1234567890" in link_ml, "Ver Oferta ML abre o anúncio MLB do produto")
     checar(f"identity={ID_MERCADO_LIVRE}" in link_ml, "ML carimba identity mape592520")
 
     shp = _montar_item_oferta(
@@ -4165,8 +4199,8 @@ def executar_testes_unitarios():
         "shopee",
     )
     link_shp = _link_compra_do_card(shp)
-    checar("shopee.com.br/search" in link_shp and "keyword=" in link_shp, "Shopee abre busca pública (sem login)")
-    checar("sortBy=sales" in link_shp and "sortBy=price" not in link_shp, "Shopee busca pelos mais vendidos, não pelo acessório mais barato")
+    checar("-i.1.2" in link_shp, "Ver Oferta Shopee abre o anúncio do produto")
+    checar(f"sub_id={ID_SHOPEE}" in link_shp, "Shopee carimba sub_id 18381751263")
     fb_link = _ofertas_fallback_lojas("cabo usb tipo c")
     amz_fb = next(p for p in fb_link if p["plataforma"] == "amazon")
     ml_fb = next(p for p in fb_link if p["plataforma"] == "mercado_livre")
@@ -4207,7 +4241,9 @@ def _oferta_pronta_para_compra(produto):
     if plat == "mercado_livre":
         return f"identity={ID_MERCADO_LIVRE}" in url
     if plat == "shopee":
-        return f"sub_id={ID_SHOPEE}" in url and "shopee.com.br/search" in url
+        return f"sub_id={ID_SHOPEE}" in url and (
+            "shopee.com.br/search" in url or "-i." in url or "/product/" in url
+        )
     return False
 
 
