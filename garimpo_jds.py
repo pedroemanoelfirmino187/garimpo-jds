@@ -717,6 +717,8 @@ def _url_e_busca_loja(url):
     query = (parsed.query or "").lower()
     host = (parsed.netloc or "").lower()
     if "google." in host:
+        if "ibp=oshop" in u or "prds=" in u or "/shopping/" in path:
+            return False
         return "/search" in path
     if any(p in path for p in ("/search", "/sch/", "/jm/search")):
         return True
@@ -1946,7 +1948,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v27:" + pais + ":" + _termo_cache_norm(termo)
+    return "v28:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2391,7 +2393,8 @@ def _desempacotar_link_google(href):
     if not h.startswith("http"):
         return ""
     if "google." in h.lower() and not _plataforma_loja(h):
-        if "/shopping/" in h.lower():
+        baixa = h.lower()
+        if "/shopping/" in baixa or "ibp=oshop" in baixa or "prds=" in baixa:
             return h.split("#")[0]
         return ""
     return h.split("#")[0]
@@ -4646,6 +4649,19 @@ def executar_testes_unitarios():
         and abs(float(gshop[0].get("preco_num") or 0) - 89.90) < 0.05
         and "shopping/product" in (gshop[0].get("url") or ""),
         "Shopping Google com source Amazon entra; Magazine Luiza sai",
+    )
+    oshop = _ofertas_de_itens_serper("controle ps5", [{
+        "title": "Controle Dualsense Sem Fio Sony",
+        "source": "Amazon.com.br - Retail",
+        "price": "R$ 404,27 agora",
+        "link": "https://www.google.com/search?ibp=oshop&q=controle+ps5&prds=catalogid:4499265276956382",
+        "imageUrl": "https://encrypted-tbn0.gstatic.com/shopping?q=tbn:teste",
+    }])
+    checar(
+        oshop and oshop[0].get("plataforma") == "amazon"
+        and abs(float(oshop[0].get("preco_num") or 0) - 404.27) < 0.05
+        and "ibp=oshop" in (oshop[0].get("url") or ""),
+        "link Google oshop da Amazon entra com o preço",
     )
     busca_vs_anuncio = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
         {
