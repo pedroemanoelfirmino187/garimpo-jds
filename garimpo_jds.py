@@ -60,6 +60,38 @@ def _normalizar_pais(pais):
     return "BR"
 
 
+_TEXTOS_SERVIDOR = {
+    "nenhum_produto": {
+        "BR": "Nenhum produto encontrado",
+        "US": "No products found",
+    },
+    "erro_servidor": {
+        "BR": "Erro no servidor",
+        "US": "Server error",
+    },
+    "token_invalido": {
+        "BR": "token inválido",
+        "US": "invalid token",
+    },
+    "ver_preco_loja": {
+        "BR": "Ver preço na loja",
+        "US": "See price in store",
+    },
+    "ver_preco_site": {
+        "BR": "Ver Preço Real no Site",
+        "US": "See real price on the site",
+    },
+    "ok": {"BR": "ok", "US": "ok"},
+}
+
+
+def mensagem_servidor(chave, pais="BR"):
+    """Texto da API no idioma do mercado: BR → português, US → inglês."""
+    bloco = _TEXTOS_SERVIDOR.get(chave) or {}
+    idioma = "US" if _normalizar_pais(pais) == "US" else "BR"
+    return bloco.get(idioma) or bloco.get("BR") or str(chave or "")
+
+
 def _serper_locale(pais="BR"):
     if _normalizar_pais(pais) == "US":
         return {"gl": "us", "hl": "en"}
@@ -148,7 +180,7 @@ def serializar_oferta_app(item, pais="BR"):
         bruto = p.get("preco_numerico") or p.get("preco") or p.get("price")
     numero = _preco_numerico_limpo(bruto, pais=pais)
     if numero >= 999990:
-        texto = "Ver preço na loja"
+        texto = mensagem_servidor("ver_preco_loja", pais)
     else:
         texto = _formatar_preco(numero, pais=pais)
     href = aplicar_afiliado_por_dominio(
@@ -366,12 +398,15 @@ def _preco_para_numero(texto, pais="BR"):
 
 
 def _formatar_preco(valor, pais="BR"):
-    # Se o valor for 999999.0, retorna texto especial
-    if valor == 999999.0:
-        return "Ver Preço Real no Site"
+    try:
+        n = float(valor)
+    except (TypeError, ValueError):
+        n = 0.0
+    if n == 999999.0 or n >= 999990:
+        return mensagem_servidor("ver_preco_site", pais)
     if _normalizar_pais(pais) == "US":
-        return f"$ {valor:,.2f}"
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"${n:,.2f}"
+    return f"R$ {n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def _detectar_plataforma(url):
@@ -2797,7 +2832,7 @@ def _ofertas_fallback_lojas(termo, pais="BR"):
     for plat, url, foto in specs:
         ofertas.append({
             "titulo": t,
-            "preco": "Ver preço na loja",
+            "preco": mensagem_servidor("ver_preco_loja", pais),
             "preco_num": 999990.0,
             "url": url,
             "foto": foto,
@@ -4117,6 +4152,27 @@ def executar_testes_unitarios():
         f"tag={ID_AMAZON_US}" in us_json["link_afiliado"]
         and "jdseconomiz0e-20" not in us_json["link_afiliado"],
         "domínio amazon.com recebe o ID dos EUA",
+    )
+    checar(
+        us_json["preco_formatado"].startswith("$")
+        and "R$" not in us_json["preco_formatado"]
+        and "69.99" in us_json["preco_formatado"],
+        "preco_formatado US usa o símbolo do dólar",
+    )
+    checar(
+        mensagem_servidor("nenhum_produto", "US") == "No products found"
+        and mensagem_servidor("erro_servidor", "US") == "Server error"
+        and mensagem_servidor("nenhum_produto", "BR") == "Nenhum produto encontrado",
+        "mensagens da API seguem o idioma do país",
+    )
+    from api.main import _resposta_ofertas as _api_resposta_ofertas
+    vazio_us = _api_resposta_ofertas("ps5", [], pais="US")
+    vazio_br = _api_resposta_ofertas("ps5", [], pais="BR")
+    checar(
+        vazio_us.get("message") == "No products found"
+        and vazio_us.get("mensagem") == "No products found"
+        and vazio_br.get("mensagem") == "Nenhum produto encontrado",
+        "rota vazia US devolve No products found",
     )
     lista_ord = serializar_lista_app([
         {"titulo": "B", "preco_num": 80, "url": "https://www.amazon.com.br/dp/B0BBBBBBBB",
