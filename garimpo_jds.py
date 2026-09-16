@@ -1129,6 +1129,8 @@ def _titulo_relevante(termo, titulo):
     if any(w in toks for w in ("ps5", "playstation")) and "xbox" not in toks:
         if "dualsense" not in t and "sony" not in t:
             return False
+    if "dualsense" in toks and "dualsense" not in t and "dual sense" not in t:
+        return False
     hits = sum(1 for w in toks if _token_no_titulo(w, t))
     if len(toks) <= 3:
         return hits == len(toks)
@@ -1147,6 +1149,9 @@ def _parece_acessorio_barato(titulo, termo=""):
             "base de carreg", "capa para controle", "skin", "silicone",
             "suporte", "stand", "holder", "suporte controle",
             "base para controle", "carregador de controle",
+            "protetor", "capinha", "capa silicone", "capa dualsense",
+            "capa ps5", "kit analog", "tpu", "soft case", "hard case",
+            "estojo", "pouch", "chaveiro", "wall mount", "charging station",
         )
     ):
         return True
@@ -1847,7 +1852,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v17:" + pais + ":" + _termo_cache_norm(termo)
+    return "v18:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2655,19 +2660,8 @@ def _completar_lojas_serper(termo, ofertas, limite=8, pais="BR"):
         )
     t = (termo or "").strip()
     for plat, site in sites:
-        if plat in {p.get("plataforma") for p in ofertas}:
-            continue
-        dados = _serper_post("/search", {
-            "q": f"{t} {site}",
-            "gl": loc["gl"],
-            "hl": loc["hl"],
-            "num": 8,
-        })
-        for item in _ofertas_de_itens_serper(t, dados.get("organic") or [], limite, pais=pais):
-            if item.get("plataforma") == plat:
-                ofertas = _guardar_melhor_loja(ofertas, item)
-                break
-        if plat in {p.get("plataforma") for p in ofertas}:
+        atual = next((p for p in ofertas if p.get("plataforma") == plat), None)
+        if atual and _url_anuncio_exato(atual.get("url"), plat):
             continue
         dados = _serper_post("/shopping", {
             "q": f"{t} {site}",
@@ -2678,7 +2672,21 @@ def _completar_lojas_serper(termo, ofertas, limite=8, pais="BR"):
         for item in _ofertas_de_itens_serper(t, dados.get("shopping") or [], limite, pais=pais):
             if item.get("plataforma") == plat:
                 ofertas = _guardar_melhor_loja(ofertas, item)
-                break
+        tem_exato = any(
+            p.get("plataforma") == plat and _url_anuncio_exato(p.get("url"), plat)
+            for p in ofertas
+        )
+        if tem_exato:
+            continue
+        dados = _serper_post("/search", {
+            "q": f"{t} {site}",
+            "gl": loc["gl"],
+            "hl": loc["hl"],
+            "num": 8,
+        })
+        for item in _ofertas_de_itens_serper(t, dados.get("organic") or [], limite, pais=pais):
+            if item.get("plataforma") == plat:
+                ofertas = _guardar_melhor_loja(ofertas, item)
     return ofertas
 
 
@@ -3176,6 +3184,18 @@ def gerar_lista_ofertas_reais(
                 print(f"[Motor] cache instantâneo: {lista[0]['preco']} em {lista[0].get('loja')}")
                 return lista
 
+    if usar_vivo and _chave_serper():
+        ofertas = _buscar_ofertas_serper(termo, limite=20, pais=pais)
+        ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
+        if ofertas and usar_cache:
+            _gravar_cache_garimpo(termo, ofertas, pais=pais)
+        if ofertas:
+            print(
+                f"[Motor] Serper menor preço: {ofertas[0]['preco']} "
+                f"em {ofertas[0].get('loja')}"
+            )
+        return ofertas
+
     lista_produtos = []
     urls_vistas = set()
 
@@ -3283,7 +3303,7 @@ def gerar_lista_ofertas_reais(
 
 
 def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, limite=20):
-    """Entrada da API: SQLite 2h (termo+país) antes de gastar Serper."""
+    """Cada busca do usuário: termo → Serper → menor preço nas lojas do país."""
     termo = (termo or "").strip()
     pais = _normalizar_pais(pais)
     if not termo:
@@ -3293,20 +3313,18 @@ def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, l
         if cached:
             print(f"[Cache SQLite] hit {_chave_cache(termo, pais=pais)}")
             return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(cached, pais=pais))
-    if pais == "US":
-        ofertas = buscar_ofertas_serper_shopping(
-            termo, usar_cache=False, limite=limite, pais="US",
-        )
-        ofertas = _completar_lojas_serper(termo, ofertas, limite=limite, pais="US")
-        ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais="US"))
+    if usar_vivo and _chave_serper():
+        ofertas = _buscar_ofertas_serper(termo, limite=limite, pais=pais)
+        ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
         if ofertas and usar_cache:
-            _gravar_cache_garimpo(termo, ofertas, pais="US")
+            _gravar_cache_garimpo(termo, ofertas, pais=pais)
+        print(f"[Motor] Serper {pais}: {len(ofertas)} lojas, pergunta o menor preço")
         return ofertas
     ofertas = gerar_lista_ofertas_reais(
-        termo, usar_cache=False, usar_vivo=usar_vivo, pais="BR",
+        termo, usar_cache=False, usar_vivo=usar_vivo, pais=pais,
     )
     if ofertas and usar_cache:
-        _gravar_cache_garimpo(termo, ofertas, pais="BR")
+        _gravar_cache_garimpo(termo, ofertas, pais=pais)
     return ofertas
 
 
@@ -4339,6 +4357,14 @@ def executar_testes_unitarios():
         "controle ps5",
         "Suporte Controle PS5 Playstation 5 DualSense | Shopee Brasil",
     ), "suporte/base não passa como DualSense")
+    checar(not _titulo_relevante(
+        "controle dualsense ps5",
+        "Capa de Silicone para Controle DualSense PS5",
+    ), "Shopee/Amazon capa DualSense não entra")
+    checar(_titulo_relevante(
+        "controle dualsense ps5",
+        "PlayStation DualSense Controle sem fio PS5 Sony Original",
+    ), "DualSense original continua no ranking")
     checar(not _titulo_relevante(
         "redmi note 13",
         "Redmi Note 13: Qual versão vale a pena? - Mercado Livre",
