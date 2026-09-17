@@ -225,7 +225,7 @@ def health():
         "ok": True,
         "servico": "jds-economiza",
         "fonte": "serper",
-        "deploy": "v39",
+        "deploy": "v40",
         "mercados": ["BR", "US"],
         "afiliados": {
             "amazon_br": ID_AMAZON,

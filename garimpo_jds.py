@@ -1,5 +1,6 @@
 
 
+
 from __future__ import annotations
 
 import asyncio
@@ -495,10 +496,26 @@ def _url_chave(url):
 
 
 def gerar_link_afiliado(url_original, plataforma):
+    """
+    Gera o link afiliado sem trocar um anúncio identificado por uma busca.
+
+    Regra principal: se a URL já aponta para uma página de produto/anúncio,
+    preservamos exatamente essa URL e apenas aplicamos o rastreamento JDS.
+    Só criamos uma URL de busca quando a entrada realmente for uma busca ou
+    não contiver evidência suficiente de uma página de produto.
+    """
     try:
         url_limpa = (url_original or "").strip()
         if not url_limpa or "http" not in url_limpa:
             return url_limpa
+
+        # PRIMEIRO: preservar anúncio/produto exato.
+        # Isso evita que Shopee/ML/Amazon troquem o anúncio por uma busca.
+        if _eh_pagina_compra(url_limpa, plataforma):
+            url_direta = _desempacotar_link_google(url_limpa) or url_limpa
+            if url_direta.startswith("http") and not _url_e_busca_loja(url_direta):
+                return _aplicar_afiliado_google(url_direta, plataforma)
+
         if plataforma == "shopee":
             parsed_url = urllib.parse.urlparse(url_limpa)
             qs = urllib.parse.parse_qs(parsed_url.query)
@@ -509,8 +526,7 @@ def gerar_link_afiliado(url_original, plataforma):
                 termo = re.sub(r"product/\d+/\d+", "", termo)
                 termo = termo.replace("-", " ").strip()
             return _link_busca_shopee(termo or "ofertas")
-        if _eh_pagina_compra(url_limpa, plataforma):
-            return _aplicar_afiliado_google(url_limpa, plataforma)
+
         if plataforma == "amazon":
             parsed_url = urllib.parse.urlparse(url_limpa)
             qs = urllib.parse.parse_qs(parsed_url.query)
@@ -518,15 +534,18 @@ def gerar_link_afiliado(url_original, plataforma):
             if not termo:
                 termo = urllib.parse.unquote(parsed_url.path.strip("/")).replace("-", " ")
             return _link_busca_amazon(termo or "ofertas")
+
         if plataforma == "mercado_livre":
             parsed_url = urllib.parse.urlparse(url_limpa)
             slug = urllib.parse.unquote(parsed_url.path.strip("/"))
             slug = re.sub(r"/p/.*", "", slug)
             termo = slug.replace("-", " ").replace("/", " ").strip()
             return _link_busca_ml(termo or "ofertas")
+
         return url_limpa
     except Exception as e:
         print(f"[Aviso] Erro no link: {e}")
+        return (url_original or "").strip()
         return url_original
 
 
@@ -2045,7 +2064,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v39:" + pais + ":" + _termo_cache_norm(termo)
+    return "v40:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -6184,7 +6203,7 @@ def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR"):
 
 
 def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR"):
-    """Motor V2: escolhe uma referência e só compara anúncios com a mesma identidade."""
+    """Motor V2/V3: mesma identidade do produto, depois menor preço."""
     t = re.sub(r"\s+", " ", (termo or "").strip())
     pais = _normalizar_pais(pais)
     if not t:
@@ -6241,6 +6260,187 @@ def isolar_produto_mais_barato(ofertas, pais="BR"):
 print("[JDS] Motor de identidade V2 carregado")
 
 
+# ============================================================
+# JDS PRODUCT MATCHER V3
+# Identidade conservadora: compara o MESMO produto, não apenas
+# produtos da mesma categoria.
+# ============================================================
+
+_JDS_V3_BRANDS = {
+    "sony","apple","samsung","xiaomi","motorola","nintendo","microsoft",
+    "logitech","razer","corsair","kingston","sandisk","wd","seagate",
+    "nike","adidas","mondial","philips","electrolux","consul","lg","dell",
+    "lenovo","asus","acer","canon","nikon","jbl","anker","redragon"
+}
+
+_JDS_V3_VARIANTS = {
+    "branco","white","preto","black","azul","blue","vermelho","red",
+    "verde","green","rosa","pink","roxo","purple","cinza","gray","grey",
+    "prata","silver","dourado","gold"
+}
+
+_JDS_V3_CONDITION = {
+    "original": {"original"},
+    "compativel": {"compativel","compatível"},
+    "generico": {"generico","genérico"},
+    "paralelo": {"paralelo"},
+    "usado": {"usado","seminovo","semi-novo"},
+    "novo": {"novo","lacrado"}
+}
+
+def _jds_v3_norm(s):
+    s = _sem_acento(str(s or "")).lower()
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def _jds_v3_tokens(s):
+    return set(_jds_v3_norm(s).split())
+
+def _jds_v3_features(s):
+    n = _jds_v3_norm(s)
+    toks = _jds_v3_tokens(s)
+
+    brands = {b for b in _JDS_V3_BRANDS if b in toks}
+    colors = {c for c in _JDS_V3_VARIANTS if c in toks}
+
+    # Capacidades/tamanhos relevantes: 128gb, 256 gb, 1tb, 50 polegadas etc.
+    capacities = set(re.findall(
+        r"\b\d+(?:[.,]\d+)?\s*(?:gb|tb|mb|g|kg|ml|l|mah|w|hz|polegadas|pol)\b", n
+    ))
+
+    # Códigos/modelos que misturam letras e números.
+    models = set(re.findall(r"\b[a-z]{1,8}[-]?[a-z0-9]*\d[a-z0-9-]*\b", n))
+
+    condition = set()
+    for key, vals in _JDS_V3_CONDITION.items():
+        if any(v in toks for v in vals):
+            condition.add(key)
+
+    # "compatível com PS5" é uma identidade diferente de "Sony DualSense".
+    compatible = bool(re.search(r"\bcompat(?:ivel|ível)\b|\bgenerico\b|\bparalelo\b", n))
+    original = "original" in toks
+
+    # Plataforma/linha do produto.
+    platforms = set()
+    if "ps5" in toks or "playstation" in toks:
+        platforms.add("ps5")
+    if "ps4" in toks:
+        platforms.add("ps4")
+    if "xbox" in toks:
+        platforms.add("xbox")
+    if "switch" in toks or "nintendo" in toks:
+        platforms.add("switch")
+
+    return {
+        "tokens": toks, "brands": brands, "colors": colors,
+        "capacities": capacities, "models": models,
+        "condition": condition, "compatible": compatible,
+        "original": original, "platforms": platforms
+    }
+
+def _jds_v3_query_requirements(query):
+    f = _jds_v3_features(query)
+    toks = f["tokens"]
+    # Marca/modelo/variante explicitamente pedidos na pesquisa são restrições.
+    return f
+
+def _jds_v3_identifier(item):
+    # IDs de produto são evidência mais forte que semelhança textual.
+    for k in ("gtin","ean","mpn","asin","sku","productId","product_id","itemId","item_id"):
+        v = str(item.get(k) or "").strip().lower()
+        if v:
+            return k, v
+    return None
+
+def _jds_v3_same_product(ref, cand, consulta=""):
+    """Retorna True somente quando há evidência suficiente de identidade."""
+    rt = ref.get("titulo") if isinstance(ref, dict) else ref
+    ct = cand.get("titulo") if isinstance(cand, dict) else cand
+    if not rt or not ct:
+        return False
+
+    r = _jds_v3_features(rt)
+    c = _jds_v3_features(ct)
+    q = _jds_v3_query_requirements(consulta)
+
+    # Conflitos fundamentais.
+    if r["platforms"] and c["platforms"] and not (r["platforms"] & c["platforms"]):
+        return False
+    if r["brands"] and not (r["brands"] & c["brands"]):
+        return False
+    if r["models"] and not r["models"].issubset(c["tokens"]):
+        return False
+    if r["capacities"] and not r["capacities"].issubset(c["capacities"]):
+        return False
+    if r["colors"] and not (r["colors"] & c["colors"]):
+        return False
+
+    # A consulta também impõe restrições. Isso evita transformar
+    # "Sony" em "qualquer controle PS5", por exemplo.
+    if q["brands"] and not q["brands"].issubset(c["brands"]):
+        return False
+    if q["models"] and not q["models"].issubset(c["tokens"]):
+        return False
+    if q["capacities"] and not q["capacities"].issubset(c["capacities"]):
+        return False
+    if q["colors"] and not (q["colors"] & c["colors"]):
+        return False
+    if q["platforms"] and not q["platforms"].issubset(c["platforms"]):
+        return False
+
+    # Original/genérico/compatível são categorias distintas quando
+    # a pesquisa ou referência deixa isso explícito.
+    if (q["original"] or r["original"]) and c["compatible"]:
+        return False
+    if q["compatible"] and not c["compatible"]:
+        return False
+
+    # Se a referência é claramente compatível/genérica, não pode virar original.
+    if r["compatible"] != c["compatible"]:
+        return False
+
+    # Identificador igual = confirmação forte.
+    ri = _jds_v3_identifier(ref) if isinstance(ref, dict) else None
+    ci = _jds_v3_identifier(cand) if isinstance(cand, dict) else None
+    if ri and ci and ri[0] == ci[0] and ri[1] == ci[1]:
+        return True
+
+    # Sem ID, exige sinais fortes suficientes.
+    common = r["tokens"] & c["tokens"]
+    ignored = {
+        "controle","sem","fio","wireless","bluetooth","com","para","de",
+        "do","da","ps5","playstation","novo","original","branco","white",
+        "preto","black","produto","oficial","nacional"
+    }
+    strong_r = {x for x in (r["brands"] | r["models"] | r["capacities"] | r["colors"]) if x}
+    strong_common = strong_r & common
+
+    # Para Sony DualSense, por exemplo, "sony" + "dualsense" precisam aparecer.
+    if len(strong_r) >= 2:
+        if len(strong_common) < len(strong_r):
+            return False
+    elif len(strong_r) == 1:
+        # Um único sinal forte exige boa sobreposição geral.
+        meaningful_r = r["tokens"] - ignored
+        meaningful_c = c["tokens"] - ignored
+        if not meaningful_r or len(meaningful_r & meaningful_c) / max(1, len(meaningful_r)) < 0.75:
+            return False
+    else:
+        # Pesquisa genérica sem marca/modelo: não fazemos falsa equivalência
+        # só porque ambos são da mesma categoria.
+        meaningful_r = r["tokens"] - ignored
+        meaningful_c = c["tokens"] - ignored
+        if len(meaningful_r & meaningful_c) < 2:
+            return False
+
+    return True
+
+# Substitui a validação V2 pela V3.
+_jds_mesmo_produto = _jds_v3_same_product
+
+print("[JDS] Product Matcher V3 carregado — identidade conservadora")
+
+
 if __name__ == "__main__":
     import sys
 
@@ -6268,3 +6468,4 @@ if __name__ == "__main__":
     else:
         print("[Info] Executando rotina completa de testes do motor de busca:")
         executar_testes_motor_busca()
+
