@@ -769,7 +769,6 @@ def _link_do_item_serper_card(produto):
     p = produto if isinstance(produto, dict) else {}
     plat = p.get("plataforma") or _plataforma_loja(p.get("url") or "")
     pais = _normalizar_pais(p.get("pais") or "BR")
-    google_vis = ""
     for bruto in (p.get("url"), p.get("link"), p.get("link_afiliado")):
         h = (bruto or "").strip()
         if not h:
@@ -780,11 +779,10 @@ def _link_do_item_serper_card(produto):
         if _url_e_busca_loja(h):
             continue
         if _url_e_google(h):
-            google_vis = h.split("#")[0]
             continue
         can = _url_canonica_loja(h, plat or _plataforma_loja(h), pais=pais)
         return aplicar_afiliado_por_dominio(can)
-    return google_vis
+    return ""
 
 
 def _link_compra_do_card(produto):
@@ -797,7 +795,7 @@ def _link_compra_do_card(produto):
     q = _consulta_do_card(p)
     if fonte != "catalogo" and fonte != "busca_loja":
         direto = _link_do_item_serper_card(p)
-        if direto:
+        if direto and not _url_e_google(direto):
             return direto
     if fonte == "busca_loja":
         return aplicar_afiliado_por_dominio(url) if url.startswith("http") else url
@@ -841,7 +839,7 @@ def _link_ver_oferta(produto):
     if fonte in {"catalogo", "busca_loja"}:
         return _link_compra_do_card(p)
     direto = _link_do_item_serper_card(p)
-    if direto:
+    if direto and not _url_e_google(direto):
         return direto
     return _link_compra_do_card(p)
 
@@ -2047,7 +2045,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v37:" + pais + ":" + _termo_cache_norm(termo)
+    return "v38:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -3049,12 +3047,15 @@ def _colar_anuncio_organico(item, organicos, termo, pais="BR", exigir_mesmo=True
 
 
 def _resolver_links_anuncio_serper(termo, ofertas, pais="BR"):
-    """Orgânica do termo + busca do título na Amazon para achar o /dp/ com o ID JDS."""
+    """Shopping da Serper vem no Google; troca pelo /dp/ /p/ /-i. do mesmo título."""
     pais = _normalizar_pais(pais)
     if not ofertas:
         return ofertas
+    saida = [dict(o) for o in ofertas]
+    if all(_url_anuncio_exato(o.get("url"), o.get("plataforma")) for o in saida):
+        return saida
     organicos = _organic_serper(termo, pais=pais)
-    saida = [_colar_anuncio_organico(dict(o), organicos, termo, pais=pais) for o in ofertas]
+    saida = [_colar_anuncio_organico(o, organicos, termo, pais=pais) for o in saida]
     for o in saida:
         plat = o.get("plataforma")
         if _url_anuncio_exato(o.get("url"), plat):
@@ -3065,6 +3066,12 @@ def _resolver_links_anuncio_serper(termo, ofertas, pais="BR"):
         if plat == "amazon" and not _url_anuncio_exato(o.get("url"), "amazon"):
             extra_amz = _organic_serper(f"{tit} amazon", pais=pais)
             _colar_anuncio_organico(o, extra_amz, termo, pais=pais)
+        elif plat == "mercado_livre" and not _url_anuncio_exato(o.get("url"), plat):
+            extra_ml = _organic_serper(f"{tit} mercado livre", pais=pais)
+            _colar_anuncio_organico(o, extra_ml, termo, pais=pais)
+        elif plat == "shopee" and not _url_anuncio_exato(o.get("url"), plat):
+            extra_sh = _organic_serper(f"{tit} shopee", pais=pais)
+            _colar_anuncio_organico(o, extra_sh, termo, pais=pais)
     return saida
 
 
@@ -3138,6 +3145,7 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
         if not faltando:
             if ofertas:
                 break
+    ofertas = _resolver_links_anuncio_serper(t, ofertas, pais=pais)
     ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
     _ULTIMO_DIAG_SERPER.clear()
     _ULTIMO_DIAG_SERPER.update({
@@ -5018,9 +5026,10 @@ def executar_testes_unitarios():
     ver_sem_dp = _link_ver_oferta(dict(oshop_card))
     checar(
         ver_sem_dp.startswith("http")
-        and "/s?" not in ver_sem_dp
-        and "price-asc-rank" not in ver_sem_dp,
-        "sem /dp/ no JSON, Ver Oferta não inventa busca Amazon de paralelo",
+        and "google." not in ver_sem_dp
+        and "ibp=oshop" not in ver_sem_dp
+        and f"tag={ID_AMAZON}" in ver_sem_dp,
+        "sem /dp/ no JSON, Ver Oferta não abre o Google Shopping",
     )
     mais_barato_oshop = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
         {
