@@ -1108,6 +1108,9 @@ def _token_no_titulo(tok, titulo):
         "ps5": ("ps5", "playstation 5", "playstation5", "dualsense"),
         "playstation": ("playstation", "ps5", "dualsense"),
         "dualsense": ("dualsense", "dual sense"),
+        "whey": ("whey", "protein", "proteina"),
+        "protein": ("protein", "proteina", "whey"),
+        "proteina": ("proteina", "protein", "whey"),
     }
     for alt in sinonimos.get(tok, ()):
         if alt in titulo:
@@ -1174,7 +1177,7 @@ def _titulo_e_amostra_miniatura(termo, titulo):
 
 
 def _titulo_shopping_ok(termo, titulo):
-    """Shopping: pelo menos um token do termo; não exige o título copiar a busca inteira."""
+    """Shopping: o título tem que ser o produto buscado (todas as palavras), aí o mais barato ganha."""
     if _titulo_e_acessorio_imediato(titulo) or _parece_artigo_nao_produto(titulo):
         return False
     if _titulo_e_amostra_miniatura(termo, titulo):
@@ -1194,7 +1197,7 @@ def _titulo_shopping_ok(termo, titulo):
     if any(w in toks for w in ("ps5", "playstation", "dualsense")) and "xbox" not in toks:
         if "xbox" in t and "dualsense" not in t and "ps5" not in t:
             return False
-    return any(_token_no_titulo(tok, t) for tok in toks)
+    return _termo_contido_no_titulo(termo, titulo)
 
 
 def _termo_contido_no_titulo(termo, titulo):
@@ -1963,7 +1966,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v30:" + pais + ":" + _termo_cache_norm(termo)
+    return "v31:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -4684,7 +4687,7 @@ def executar_testes_unitarios():
         not any(p.get("plataforma") == "shopee" for p in misturado_serper),
         "capa/capinha/suporte/cabo da Shopee é descartado",
     )
-    gshop = _ofertas_de_itens_serper("garrafa de cafe", [
+    gshop = _ofertas_de_itens_serper("garrafa termica", [
         {
             "title": "Garrafa Térmica Inox 500ml",
             "source": "Amazon.com.br",
@@ -4735,6 +4738,34 @@ def executar_testes_unitarios():
         not _titulo_shopping_ok("whey protein", "100% Whey Crush - 1 Sachê 30g Chocobear")
         and _titulo_shopping_ok("whey protein", "100% Whey Crush 900g Under Labz"),
         "sachê 30g de whey não substitui o pote",
+    )
+    checar(
+        _titulo_shopping_ok("dualsense", "Controle DualSense Sony PS5")
+        and not _titulo_shopping_ok("dualsense", "Gamrombo Controle LED PS5")
+        and _titulo_shopping_ok("controle ps5", "Gamrombo Controle LED PS5"),
+        "produto exato: DualSense não vira Gamrombo; controle ps5 aceita o gamepad",
+    )
+    exato_barato = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("dualsense", [
+        {
+            "title": "Gamrombo Controle LED PS5",
+            "source": "Amazon.com.br - Seller",
+            "price": "R$ 330,00",
+            "link": "https://www.google.com/search?ibp=oshop&q=dualsense&prds=catalogid:1",
+            "imageUrl": "https://encrypted-tbn0.gstatic.com/shopping?q=tbn:barato",
+        },
+        {
+            "title": "PlayStation DualSense Controle sem fio PS5 Sony",
+            "source": "Amazon.com.br - Retail",
+            "price": "R$ 404,27",
+            "link": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+            "imageUrl": "https://m.media-amazon.com/images/I/dual.jpg",
+        },
+    ]))
+    checar(
+        exato_barato
+        and abs(float(exato_barato[0].get("preco_num") or 0) - 404.27) < 0.05
+        and "dualsense" in _sem_acento(exato_barato[0].get("titulo") or ""),
+        "na lista da Serper o mais barato só ganha se for o produto exato",
     )
     mais_barato_oshop = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
         {
