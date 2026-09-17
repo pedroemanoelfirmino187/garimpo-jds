@@ -634,12 +634,12 @@ NOMES_LOJA = {
 
 
 def _link_busca_shopee(termo):
-    """Busca do produto na Shopee (mais vendidos), sem login — evita capa/cabo no topo."""
+    """Busca pública na Shopee (mais vendidos), sem utm de afiliado que pede login."""
     q = urllib.parse.quote((termo or "ofertas").strip())
     return (
         f"https://shopee.com.br/search?keyword={q}"
         f"&sortBy=sales"
-        f"&utm_source=an_{ID_SHOPEE}&utm_medium=affiliates&sub_id={ID_SHOPEE}"
+        f"&sub_id={ID_SHOPEE}"
     )
 
 
@@ -650,8 +650,9 @@ def _consulta_shopee(produto):
 
 
 def _consulta_do_card(produto):
+    """Título do anúncio, não o termo curto (evita Amazon abrir controle paralelo)."""
     p = produto or {}
-    return (p.get("termo_busca") or p.get("titulo") or "ofertas").strip()
+    return (p.get("titulo") or p.get("termo_busca") or "ofertas").strip()
 
 
 def _link_busca_ml(termo):
@@ -665,18 +666,14 @@ def _link_busca_ml(termo):
 
 
 def _link_busca_amazon(termo):
-    """Busca do produto na Amazon ordenada do menor preço (price-asc-rank)."""
+    """Busca do produto na Amazon por relevância (price-asc mostra paralelo)."""
     q = urllib.parse.quote((termo or "ofertas").strip())
-    return (
-        f"https://www.amazon.com.br/s?k={q}&s=price-asc-rank&tag={ID_AMAZON}"
-    )
+    return f"https://www.amazon.com.br/s?k={q}&tag={ID_AMAZON}"
 
 
 def _link_busca_amazon_us(termo):
     q = urllib.parse.quote((termo or "deals").strip())
-    return (
-        f"https://www.amazon.com/s?k={q}&s=price-asc-rank&tag={ID_AMAZON_US}"
-    )
+    return f"https://www.amazon.com/s?k={q}&tag={ID_AMAZON_US}"
 
 
 def _link_busca_ebay(termo):
@@ -767,6 +764,24 @@ def _url_anuncio_exato(url, plat):
     return False
 
 
+def _amazon_dualsense_oficial(produto, pais="BR"):
+    """Busca DualSense: ficha Sony /dp/, nunca genérico paralelo."""
+    p = produto if isinstance(produto, dict) else {}
+    termo = _sem_acento(p.get("termo_busca") or "")
+    titulo = _sem_acento(p.get("titulo") or "")
+    blob = f"{termo} {titulo}"
+    if "dualsense" not in blob and "dual sense" not in blob:
+        return ""
+    if any(x in titulo for x in ("gamrombo", "knup", "lenisuole", "paralelo", "compativel com")):
+        return ""
+    pais = _normalizar_pais(pais)
+    if pais == "US":
+        return aplicar_tag_amazon_eua(f"https://www.amazon.com/dp/{ASIN_DUALSENSE}")
+    return _aplicar_afiliado_google(
+        f"https://www.amazon.com.br/dp/{ASIN_DUALSENSE}", "amazon", pais=pais,
+    )
+
+
 def _link_compra_do_card(produto):
     """Ver Oferta: anúncio direto do produto. Busca da loja só em catálogo/fallback."""
     plat = (produto or {}).get("plataforma")
@@ -774,6 +789,9 @@ def _link_compra_do_card(produto):
     pais = _normalizar_pais((produto or {}).get("pais") or "BR")
     fonte = ((produto or {}).get("fonte") or "").lower()
     q = _consulta_do_card(produto)
+    oficial = _amazon_dualsense_oficial(produto, pais)
+    if plat == "amazon" and oficial:
+        return oficial
     if fonte == "busca_loja":
         return aplicar_afiliado_por_dominio(url) if url.startswith("http") else url
     url = _desempacotar_link_google(url) or url
@@ -823,6 +841,9 @@ def _link_ver_oferta(produto):
     fonte = (p.get("fonte") or "").lower()
     if fonte == "catalogo":
         return _link_compra_do_card(p)
+    oficial = _amazon_dualsense_oficial(p, pais)
+    if plat == "amazon" and oficial:
+        return oficial
     for bruto in (p.get("url"), p.get("link"), p.get("link_afiliado")):
         h = _desempacotar_link_google((bruto or "").strip()) or (bruto or "").strip()
         if _url_e_google(h) or _url_e_busca_loja(h):
@@ -1491,8 +1512,8 @@ def _aplicar_afiliado_google(link_loja, plataforma=None, pais="BR"):
             qs["identity"] = [ID_MERCADO_LIVRE]
         elif plat == "shopee":
             qs["sub_id"] = [ID_SHOPEE]
-            qs["utm_source"] = [f"an_{ID_SHOPEE}"]
-            qs["utm_medium"] = ["affiliates"]
+            qs.pop("utm_source", None)
+            qs.pop("utm_medium", None)
             if "shopee.com.br/search" in url_limpa.lower():
                 qs["sortBy"] = ["sales"]
                 qs.pop("order", None)
@@ -1745,7 +1766,7 @@ CATALOGO_PRODUTOS_REAIS = [
                 "titulo": "Controle DualSense Sony Original PS5 Branco",
                 "preco": 449.00,
                 "de": 499.90,
-                "url": f"https://shopee.com.br/search?keyword={urllib.parse.quote('controle dualsense sony original ps5')}&utm_source=an_{ID_SHOPEE}&utm_medium=affiliates&sub_id={ID_SHOPEE}",
+                "url": f"https://shopee.com.br/search?keyword={urllib.parse.quote('controle dualsense sony original ps5')}&sortBy=sales&sub_id={ID_SHOPEE}",
                 "full": True,
             },
         ],
@@ -1775,7 +1796,7 @@ CATALOGO_PRODUTOS_REAIS = [
                 "titulo": "Controle Xbox Series Wireless Carbon Black Original",
                 "preco": 469.00,
                 "de": 549.90,
-                "url": f"https://shopee.com.br/search?keyword={urllib.parse.quote('controle xbox series wireless original')}&utm_source=an_{ID_SHOPEE}&utm_medium=affiliates&sub_id={ID_SHOPEE}",
+                "url": f"https://shopee.com.br/search?keyword={urllib.parse.quote('controle xbox series wireless original')}&sortBy=sales&sub_id={ID_SHOPEE}",
                 "full": True,
             },
         ],
@@ -2034,7 +2055,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v35:" + pais + ":" + _termo_cache_norm(termo)
+    return "v36:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -3051,9 +3072,7 @@ def _resolver_links_anuncio_serper(termo, ofertas, pais="BR"):
         _colar_anuncio_organico(o, extra, termo, pais=pais)
         if plat == "amazon" and not _url_anuncio_exato(o.get("url"), "amazon"):
             extra_amz = _organic_serper(f"{tit} amazon", pais=pais)
-            _colar_anuncio_organico(
-                o, extra_amz, termo, pais=pais, exigir_mesmo=False,
-            )
+            _colar_anuncio_organico(o, extra_amz, termo, pais=pais)
     return saida
 
 
@@ -5187,8 +5206,12 @@ def executar_testes_unitarios():
     ml_tv = next(p for p in tv if p.get("plataforma") == "mercado_livre")
     amz_tv = next(p for p in tv if p.get("plataforma") == "amazon")
     checar("OrderId_PRICE" in _link_compra_do_card(ml_tv), "catálogo ML abre busca, não /p/ inexistente")
-    checar("/s?" in _link_compra_do_card(amz_tv) and "price-asc-rank" in _link_compra_do_card(amz_tv),
-           "catálogo Amazon sem DualSense abre busca, não /dp/ 404")
+    checar(
+        "/s?" in _link_compra_do_card(amz_tv)
+        and "price-asc-rank" not in _link_compra_do_card(amz_tv)
+        and f"tag={ID_AMAZON}" in _link_compra_do_card(amz_tv),
+        "catálogo Amazon sem DualSense abre busca, não /dp/ 404",
+    )
     checar(abs(_preco_de_html_amazon(
         '<span class="a-price"><span class="a-offscreen">R$ 404,27</span></span>'
         '<span class="a-price a-text-price"><span class="a-offscreen">R$ 499,90</span></span>'
@@ -5504,11 +5527,47 @@ def executar_testes_unitarios():
     link_shp = _link_compra_do_card(shp)
     checar("-i.1.2" in link_shp, "Ver Oferta Shopee abre o anúncio do produto")
     checar(f"sub_id={ID_SHOPEE}" in link_shp, "Shopee carimba sub_id 18381751263")
+    checar("utm_source=" not in link_shp and "utm_medium=" not in link_shp,
+           "Shopee produto não usa utm de afiliado (pede login)")
+    amz_google = _montar_item_oferta(
+        "PlayStation DualSense Controle sem fio",
+        404.27,
+        "https://www.google.com/search?ibp=oshop&q=dualsense",
+        FOTO_PADRAO,
+        "amazon",
+    )
+    amz_google["termo_busca"] = "dualsense"
+    ver_ds = _link_ver_oferta(amz_google)
+    checar(
+        f"/dp/{ASIN_DUALSENSE}" in ver_ds and "google." not in ver_ds and "/s?" not in ver_ds,
+        "DualSense na Amazon abre /dp/ Sony, não Google nem paralelo",
+    )
+    amz_paralelo = _montar_item_oferta(
+        "PlayStation DualSense Controle sem fio",
+        89.90,
+        "https://www.amazon.com.br/dp/B0PARALELO1",
+        FOTO_PADRAO,
+        "amazon",
+    )
+    checar(
+        f"/dp/{ASIN_DUALSENSE}" in _link_ver_oferta(amz_paralelo),
+        " DualSense não abre ASIN de controle paralelo",
+    )
+    busca_shp = _aplicar_afiliado_google(
+        "https://shopee.com.br/search?keyword=dualsense", "shopee"
+    )
+    checar("utm_source=" not in busca_shp and f"sub_id={ID_SHOPEE}" in busca_shp,
+           "busca Shopee sem utm an_ (login) e com sub_id")
     fb_link = _ofertas_fallback_lojas("cabo usb tipo c")
     amz_fb = next(p for p in fb_link if p["plataforma"] == "amazon")
     ml_fb = next(p for p in fb_link if p["plataforma"] == "mercado_livre")
     shp_fb = next(p for p in fb_link if p["plataforma"] == "shopee")
-    checar("price-asc-rank" in _link_compra_do_card(amz_fb), "Ver Oferta Amazon (sem preço) ordena pelo menor")
+    checar(
+        "/s?" in _link_compra_do_card(amz_fb)
+        and "price-asc-rank" not in _link_compra_do_card(amz_fb)
+        and f"tag={ID_AMAZON}" in _link_compra_do_card(amz_fb),
+        "Ver Oferta Amazon (sem /dp/) abre busca do título, não paralelo barato",
+    )
     checar("OrderId_PRICE" in _link_compra_do_card(ml_fb), "Ver Oferta ML (sem preço) ordena pelo menor")
     checar("sortBy=sales" in _link_compra_do_card(shp_fb), "Ver Oferta Shopee abre os mais vendidos do produto")
     checar(f"sub_id={ID_SHOPEE}" in link_shp, "Shopee carimba sub_id 18381751263")
