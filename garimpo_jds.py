@@ -2045,7 +2045,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v38:" + pais + ":" + _termo_cache_norm(termo)
+    return "v39:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -5590,6 +5590,24 @@ def executar_testes_unitarios():
         ).find("/dp/B0CQKLS4RP") >= 0,
         "afiliado Amazon preserva página de compra",
     )
+    checar(
+        _jds_mesmo_produto(
+            "Controle DualSense Sony PS5",
+            "Sony DualSense Wireless Controller PS5",
+            "dualsense",
+        )
+        and not _jds_mesmo_produto(
+            "Controle DualSense Sony PS5",
+            "Xbox Wireless Controller Series",
+            "dualsense",
+        )
+        and not _jds_mesmo_produto(
+            "Controle DualSense Sony PS5",
+            "Gamrombo Controle LED PS5",
+            "dualsense",
+        ),
+        "identidade V2: DualSense não mistura Xbox nem paralelo",
+    )
     return falhas
 
 
@@ -5911,6 +5929,317 @@ def executar_testes_motor_busca():
 
     print("=" * 80)
     return resultados
+
+# ===== JDS PRECISAO V2 =====
+_JDS_IDENTIDADE_STOP = {
+    "produto", "oferta", "original", "novo", "nova", "melhor", "preco", "preço",
+    "barato", "barata", "promocao", "promoção", "frete", "gratis", "grátis", "loja",
+    "oficial", "unidade", "un", "kit", "com", "para", "de", "da", "do", "e", "em",
+    "na", "no", "nas", "nos", "um", "uma", "the", "for", "with", "and", "best",
+    "sale", "wireless", "sem", "fio", "cor", "coracao", "coracao", "branco", "preto",
+    "azul", "vermelho", "verde", "rosa", "cinza", "dourado", "prata",
+}
+
+_JDS_MARCAS = {
+    "sony", "microsoft", "xbox", "playstation", "samsung", "xiaomi", "redmi", "apple",
+    "iphone", "motorola", "lenovo", "nike", "adidas", "stanley", "mondial", "philips",
+    "lg", "jbl", "anker", "logitech", "razer", "hyperx", "kingston", "corsair", "dell",
+    "asus", "acer", "hp", "epson", "nintendo", "canon", "nikon", "braun", "oster",
+    "electrolux", "consul", "brastemp", "gamrombo", "dualshock", "dualsense",
+}
+
+
+def _jds_tokens_identidade(texto):
+    """Tokens usados para identidade; remove palavras de compra/marketing."""
+    s = _sem_acento(str(texto or "").lower())
+    s = s.replace("sem fio", "wireless")
+    s = s.replace("air fryer", "airfryer")
+    tokens = re.findall(r"[a-z0-9]+", s)
+    return [t for t in tokens if len(t) >= 2 and t not in _JDS_IDENTIDADE_STOP]
+
+
+def _jds_identidade(texto):
+    """Extrai sinais fortes de identidade sem inventar SKU/EAN/modelo."""
+    toks = _jds_tokens_identidade(texto)
+    marcas = {t for t in toks if t in _JDS_MARCAS}
+    numericos = {t for t in toks if t.isdigit() and len(t) >= 2}
+    modelos = set()
+    for t in toks:
+        # Modelos normalmente misturam letras e números: A15, CFI-ZCT1W, G502, X1000 etc.
+        if len(t) >= 3 and re.search(r"[a-z]", t) and re.search(r"\d", t):
+            modelos.add(t)
+    # Palavras de produto que, embora não sejam marca, diferenciam bastante o item.
+    distintivos = {
+        t for t in toks
+        if len(t) >= 5 and t not in {"controle", "celular", "smartphone", "notebook", "tenis", "garrafa", "copo", "fone", "mouse"}
+    }
+    return {
+        "tokens": set(toks),
+        "marcas": marcas,
+        "numericos": numericos,
+        "modelos": modelos,
+        "distintivos": distintivos,
+    }
+
+
+def _jds_token_presente(token, titulo):
+    return _token_no_titulo(token, _sem_acento(titulo or ""))
+
+
+def _jds_conflito_identidade(a, b):
+    """Conflitos que tornam duas ofertas incompatíveis."""
+    ta = set(_jds_tokens_identidade(a))
+    tb = set(_jds_tokens_identidade(b))
+    grupos = (
+        ({"ps5", "playstation", "dualsense", "dualshock"}, {"xbox", "series", "one"}),
+        ({"iphone"}, {"galaxy", "redmi", "xiaomi", "motorola"}),
+        ({"ps5", "playstation"}, {"ps4"}),
+        ({"xbox"}, {"ps5", "playstation"}),
+    )
+    for g1, g2 in grupos:
+        if ta & g1 and tb & g2:
+            return True
+        if tb & g1 and ta & g2:
+            return True
+    return False
+
+
+def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
+    """Validação conservadora. Sem identidade suficiente, não compara."""
+    if not ref_titulo or not cand_titulo:
+        return False
+    if _jds_conflito_identidade(ref_titulo, cand_titulo):
+        return False
+
+    r = _jds_identidade(ref_titulo)
+    c = _jds_identidade(cand_titulo)
+
+    # Marca explícita na referência é uma restrição rígida.
+    if r["marcas"] and not (r["marcas"] & c["marcas"]):
+        return False
+
+    # Modelo misto letra+número é praticamente um identificador; não aceitar divergência.
+    if r["modelos"]:
+        if not r["modelos"].issubset(c["tokens"]):
+            return False
+
+    # Números de capacidade/modelo/geração são restrições rígidas quando aparecem na referência.
+    if r["numericos"]:
+        if not all(_jds_token_presente(n, cand_titulo) for n in r["numericos"]):
+            return False
+
+    # Identidade por tokens, mas exigindo TODOS os sinais distintivos da referência.
+    fortes = set(r["distintivos"]) | set(r["modelos"]) | set(r["marcas"])
+    if fortes:
+        faltantes = [t for t in fortes if not _jds_token_presente(t, cand_titulo)]
+        if faltantes:
+            return False
+
+    # Para buscas genéricas, usa a consulta como segunda barreira.
+    q = _jds_identidade(consulta)
+    if q["marcas"] and not q["marcas"].issubset(c["marcas"] | q["marcas"]):
+        return False
+
+    # Similaridade final. Uma oferta que compartilha apenas "controle"/"ps5" não passa.
+    comuns = r["tokens"] & c["tokens"]
+    if len(r["tokens"]) <= 2:
+        return len(comuns) == len(r["tokens"])
+    return len(comuns) / max(1, len(r["tokens"])) >= 0.70
+
+
+def _jds_item_serper(termo, bruto, pais="BR"):
+    """Converte um item bruto do Shopping preservando IDs quando o Google fornecer."""
+    if not isinstance(bruto, dict):
+        return None
+    bloco = _bloco_serper_isolado(bruto)
+    if not bloco:
+        return None
+    titulo = bloco["title"]
+    fonte = bloco["source"]
+    if not titulo or not _source_loja_oficial(fonte, pais=pais):
+        return None
+    href = _href_item_serper(bruto)
+    if not href:
+        href = _desempacotar_link_google(str(bloco.get("link") or ""))
+    if not href or _url_e_busca_loja(href):
+        return None
+    plat = _loja_do_texto(fonte) or _plataforma_loja(href)
+    if plat not in _lojas_do_pais(pais):
+        return None
+    preco = _preco_item_serper(bruto, pais=pais)
+    if preco <= 0:
+        return None
+    item = _item_google(termo, titulo, preco, href, bloco.get("imageUrl"), plat, origem="serper", pais=pais)
+    if not item:
+        return None
+    # Preserva possíveis identificadores fornecidos pelo Shopping/API.
+    for k in ("asin", "gtin", "ean", "mpn", "sku", "productId", "product_id", "itemId", "item_id"):
+        if bruto.get(k) not in (None, ""):
+            item[k] = str(bruto.get(k))
+    item["identidade_titulo"] = _titulo_limpo_oferta(titulo)
+    return item
+
+
+def _jds_extrair_candidatos(termo, itens, pais="BR", limite=40):
+    candidatos = []
+    vistos = set()
+    for bruto in itens or []:
+        item = _jds_item_serper(termo, bruto, pais=pais)
+        if not item:
+            continue
+        url = _url_chave(item.get("url") or "")
+        chave = url or (_sem_acento(item.get("titulo") or ""), item.get("plataforma"), item.get("preco_num"))
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        candidatos.append(item)
+    candidatos.sort(key=_rank_oferta_real)
+    return candidatos[:limite]
+
+
+def _jds_pontuar_referencia(consulta, item):
+    q = _jds_identidade(consulta)
+    t = _jds_identidade(item.get("titulo") or "")
+    if _jds_conflito_identidade(consulta, item.get("titulo")):
+        return -9999
+    score = 0.0
+    if q["marcas"]:
+        score += 30 if q["marcas"] & t["marcas"] else -40
+    if q["modelos"]:
+        score += 60 if q["modelos"].issubset(t["tokens"]) else -60
+    if q["numericos"]:
+        score += 25 * sum(_jds_token_presente(n, item.get("titulo")) for n in q["numericos"])
+        score -= 50 * sum(not _jds_token_presente(n, item.get("titulo")) for n in q["numericos"])
+    comuns = q["tokens"] & t["tokens"]
+    score += 5 * len(comuns)
+    # URLs de produto reais recebem preferência sobre resultados ambíguos.
+    if _url_anuncio_exato(item.get("url") or "", item.get("plataforma")):
+        score += 15
+    return score
+
+
+def _jds_escolher_referencia(consulta, candidatos):
+    """Escolhe a referência somente entre resultados que atendem à busca."""
+    validos = [x for x in candidatos if _titulo_shopping_ok(consulta, x.get("titulo") or "")]
+    if not validos:
+        return None
+    validos.sort(key=lambda x: (-_jds_pontuar_referencia(consulta, x), _rank_oferta_real(x)))
+    return validos[0]
+
+
+def _jds_buscar_loja_identica(consulta, referencia, plataforma, pais="BR", limite=40):
+    """Procura a mesma identidade em uma loja específica."""
+    titulo_ref = referencia.get("titulo") or ""
+    identidade = _jds_identidade(titulo_ref)
+    partes = []
+    # O título completo ajuda a encontrar o mesmo SKU/modelo em lojas diferentes.
+    partes.append(titulo_ref[:140])
+    for t in sorted(identidade["modelos"] | identidade["marcas"] | identidade["numericos"]):
+        if t.lower() not in _sem_acento(titulo_ref.lower()):
+            partes.append(t)
+    partes.append({"amazon":"Amazon", "mercado_livre":"Mercado Livre", "shopee":"Shopee", "ebay":"eBay"}.get(plataforma, ""))
+    q = " ".join(x for x in partes if x).strip()
+    http, cru, loc, erro = _post_serper_shopping(q, pais=pais, num=limite)
+    if http >= 400 or not cru:
+        return None
+    candidatos = []
+    for bruto in cru:
+        item = _jds_item_serper(q, bruto, pais=pais)
+        if not item or item.get("plataforma") != plataforma:
+            continue
+        if _jds_mesmo_produto(titulo_ref, item.get("titulo") or "", consulta=consulta):
+            candidatos.append(item)
+    if not candidatos:
+        return None
+    candidatos.sort(key=lambda x: (_rank_oferta_real(x), -_jds_pontuar_referencia(titulo_ref, x)))
+    return candidatos[0]
+
+
+def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR"):
+    """Retorna apenas ofertas cuja identidade foi confirmada contra uma referência."""
+    ref = _jds_escolher_referencia(consulta, candidatos)
+    if not ref:
+        return []
+
+    resultado = [ref]
+    lojas = _lojas_do_pais(pais)
+    for plat in lojas:
+        if plat == ref.get("plataforma"):
+            continue
+        item = _jds_buscar_loja_identica(consulta, ref, plat, pais=pais, limite=40)
+        if item:
+            resultado.append(item)
+
+    # Segunda validação cruzada: cada item precisa bater com a referência.
+    confirmadas = []
+    for item in resultado:
+        if item.get("plataforma") == ref.get("plataforma") or _jds_mesmo_produto(ref.get("titulo"), item.get("titulo"), consulta):
+            if _oferta_foto_preco_do_mesmo_item(item):
+                confirmadas.append(item)
+
+    # Se a busca for ambígua e só houver uma referência, não inventa comparação entre lojas.
+    if len(confirmadas) < 2:
+        return confirmadas
+    return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(confirmadas, pais=pais))
+
+
+def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR"):
+    """Motor V2: escolhe uma referência e só compara anúncios com a mesma identidade."""
+    t = re.sub(r"\s+", " ", (termo or "").strip())
+    pais = _normalizar_pais(pais)
+    if not t:
+        return []
+    sem_cache = (os.environ.get("JDS_BUSCA_SEM_CACHE") or "").strip() == "1"
+    if usar_cache and not sem_cache:
+        cached = _ler_cache_garimpo(t, pais=pais)
+        if cached:
+            lista = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(cached, pais=pais))
+            if lista:
+                print(f"[Serper] cache {_chave_cache(t, pais=pais)}")
+                return lista
+    http, cru, loc, erro = _post_serper_shopping(_consulta_serper_shopping(t), pais=pais, num=40)
+    if http >= 400 or not cru:
+        _ULTIMO_DIAG_SERPER.clear()
+        _ULTIMO_DIAG_SERPER.update({"q": t, "http": http, "shopping": len(cru or []), "erro": erro or "sem_resultados"})
+        return []
+    candidatos = _jds_extrair_candidatos(t, cru, pais=pais, limite=40)
+    resultado = _jds_comparar_mesmo_produto(t, candidatos, pais=pais)
+    resultado = _resolver_links_anuncio_serper(t, resultado, pais=pais)
+    resultado = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(resultado, pais=pais))
+    if resultado and usar_cache and not sem_cache:
+        _gravar_cache_garimpo(t, resultado, pais=pais)
+    return resultado[:limite]
+
+
+def _buscar_ofertas_serper(termo, limite=8, pais="BR"):
+    pais = _normalizar_pais(pais)
+    ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=max(20, limite), pais=pais)
+    ofertas = _ordenar_entrega_menor_preco(ofertas)
+    return ofertas[:limite]
+
+
+def isolar_produto_mais_barato(ofertas, pais="BR"):
+    pais = _normalizar_pais(pais)
+    validos = []
+    for p in ofertas or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            n = float(p.get("preco_num") or p.get("preco_numerico") or 0)
+        except (TypeError, ValueError):
+            n = 0.0
+        if n <= 0 or n >= 999990:
+            continue
+        if not _oferta_foto_preco_do_mesmo_item(p):
+            continue
+        validos.append(p)
+    if not validos:
+        return None
+    validos.sort(key=_rank_oferta_real)
+    return _carimbar_lista_afiliado([validos[0]], pais=pais)[0]
+
+print("[JDS] Motor de identidade V2 carregado")
+
 
 if __name__ == "__main__":
     import sys
