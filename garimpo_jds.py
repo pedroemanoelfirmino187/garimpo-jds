@@ -2064,7 +2064,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v40:" + pais + ":" + _termo_cache_norm(termo)
+    return "v41:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -6203,7 +6203,7 @@ def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR"):
 
 
 def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR"):
-    """Motor V2/V3: mesma identidade do produto, depois menor preço."""
+    """Motor V2/V4: mesma identidade do produto, depois menor preço."""
     t = re.sub(r"\s+", " ", (termo or "").strip())
     pais = _normalizar_pais(pais)
     if not t:
@@ -6260,185 +6260,247 @@ def isolar_produto_mais_barato(ofertas, pais="BR"):
 print("[JDS] Motor de identidade V2 carregado")
 
 
+
 # ============================================================
-# JDS PRODUCT MATCHER V3
-# Identidade conservadora: compara o MESMO produto, não apenas
-# produtos da mesma categoria.
+# JDS PRODUCT MATCHER V4
+# Motor conservador de identidade: só considera "mesmo produto"
+# quando não há conflito em atributos obrigatórios.
 # ============================================================
 
-_JDS_V3_BRANDS = {
-    "sony","apple","samsung","xiaomi","motorola","nintendo","microsoft",
-    "logitech","razer","corsair","kingston","sandisk","wd","seagate",
-    "nike","adidas","mondial","philips","electrolux","consul","lg","dell",
-    "lenovo","asus","acer","canon","nikon","jbl","anker","redragon"
+_JDS_V4_BRAND_ALIASES = {
+    "sony": {"sony"},
+    "apple": {"apple"},
+    "samsung": {"samsung"},
+    "xiaomi": {"xiaomi"},
+    "motorola": {"motorola"},
+    "nintendo": {"nintendo"},
+    "microsoft": {"microsoft"},
+    "logitech": {"logitech"},
+    "razer": {"razer"},
+    "corsair": {"corsair"},
+    "kingston": {"kingston"},
+    "sandisk": {"sandisk"},
+    "wd": {"wd", "western digital"},
+    "seagate": {"seagate"},
+    "nike": {"nike"},
+    "adidas": {"adidas"},
+    "mondial": {"mondial"},
+    "philips": {"philips"},
+    "electrolux": {"electrolux"},
+    "consul": {"consul"},
+    "lg": {"lg"},
+    "dell": {"dell"},
+    "lenovo": {"lenovo"},
+    "asus": {"asus"},
+    "acer": {"acer"},
+    "canon": {"canon"},
+    "nikon": {"nikon"},
+    "jbl": {"jbl"},
+    "anker": {"anker"},
+    "redragon": {"redragon"},
 }
 
-_JDS_V3_VARIANTS = {
-    "branco","white","preto","black","azul","blue","vermelho","red",
-    "verde","green","rosa","pink","roxo","purple","cinza","gray","grey",
-    "prata","silver","dourado","gold"
+_JDS_V4_COLOR_ALIASES = {
+    "branco": {"branco", "white"},
+    "preto": {"preto", "black"},
+    "azul": {"azul", "blue"},
+    "vermelho": {"vermelho", "red"},
+    "verde": {"verde", "green"},
+    "rosa": {"rosa", "pink"},
+    "roxo": {"roxo", "purple"},
+    "cinza": {"cinza", "gray", "grey"},
+    "prata": {"prata", "silver"},
+    "dourado": {"dourado", "gold"},
 }
 
-_JDS_V3_CONDITION = {
-    "original": {"original"},
-    "compativel": {"compativel","compatível"},
-    "generico": {"generico","genérico"},
-    "paralelo": {"paralelo"},
-    "usado": {"usado","seminovo","semi-novo"},
-    "novo": {"novo","lacrado"}
+_JDS_V4_MODEL_ALIASES = {
+    "dualsense": {"dualsense", "dual sense"},
+    "dualsense edge": {"dualsense", "dual sense", "edge"},
+    "iphone 15": {"iphone", "15"},
+    "iphone 15 pro": {"iphone", "15", "pro"},
+    "iphone 15 pro max": {"iphone", "15", "pro", "max"},
 }
 
-def _jds_v3_norm(s):
+_JDS_V4_PLATFORM_ALIASES = {
+    "ps5": {"ps5", "playstation 5"},
+    "ps4": {"ps4", "playstation 4"},
+    "xbox series": {"xbox", "series"},
+    "switch": {"switch", "nintendo switch"},
+}
+
+def _jds_v4_norm(s):
     s = _sem_acento(str(s or "")).lower()
+    s = s.replace("dual-sense", "dualsense")
     s = re.sub(r"[^a-z0-9]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
-def _jds_v3_tokens(s):
-    return set(_jds_v3_norm(s).split())
+def _jds_v4_tokens(s):
+    return set(_jds_v4_norm(s).split())
 
-def _jds_v3_features(s):
-    n = _jds_v3_norm(s)
-    toks = _jds_v3_tokens(s)
+def _jds_v4_has_phrase(text, phrase):
+    n = _jds_v4_norm(text)
+    p = _jds_v4_norm(phrase)
+    return p in n
 
-    brands = {b for b in _JDS_V3_BRANDS if b in toks}
-    colors = {c for c in _JDS_V3_VARIANTS if c in toks}
+def _jds_v4_features(s):
+    n = _jds_v4_norm(s)
+    toks = _jds_v4_tokens(s)
 
-    # Capacidades/tamanhos relevantes: 128gb, 256 gb, 1tb, 50 polegadas etc.
-    capacities = set(re.findall(
-        r"\b\d+(?:[.,]\d+)?\s*(?:gb|tb|mb|g|kg|ml|l|mah|w|hz|polegadas|pol)\b", n
+    brands = set()
+    for canonical, aliases in _JDS_V4_BRAND_ALIASES.items():
+        if any(_jds_v4_has_phrase(n, a) for a in aliases):
+            brands.add(canonical)
+
+    colors = set()
+    for canonical, aliases in _JDS_V4_COLOR_ALIASES.items():
+        if any(_jds_v4_has_phrase(n, a) for a in aliases):
+            colors.add(canonical)
+
+    platforms = set()
+    for canonical, aliases in _JDS_V4_PLATFORM_ALIASES.items():
+        if any(_jds_v4_has_phrase(n, a) for a in aliases):
+            platforms.add(canonical)
+
+    models = set()
+    for canonical, aliases in _JDS_V4_MODEL_ALIASES.items():
+        if any(_jds_v4_has_phrase(n, a) for a in aliases):
+            models.add(canonical)
+
+    # Identificadores fortes: se existirem, têm prioridade.
+    ids = set(re.findall(
+        r"\b(?:ASIN|MLB|SKU|MPN|EAN|GTIN)[\s:#-]*[A-Z0-9.-]{4,}\b",
+        str(s or ""), flags=re.I
     ))
 
-    # Códigos/modelos que misturam letras e números.
-    models = set(re.findall(r"\b[a-z]{1,8}[-]?[a-z0-9]*\d[a-z0-9-]*\b", n))
+    # Normaliza "128GB", "128 GB" e "128 gb" para a mesma identidade.
+    raw_caps = re.findall(
+        r"\b\d+(?:[.,]\d+)?\s*(?:gb|tb|mb|mah|w|hz|ml|l|kg|g)\b", n
+    )
+    capacities = {
+        re.sub(r"\s+", "", c).lower()
+        for c in raw_caps
+    }
 
-    condition = set()
-    for key, vals in _JDS_V3_CONDITION.items():
-        if any(v in toks for v in vals):
-            condition.add(key)
-
-    # "compatível com PS5" é uma identidade diferente de "Sony DualSense".
-    compatible = bool(re.search(r"\bcompat(?:ivel|ível)\b|\bgenerico\b|\bparalelo\b", n))
-    original = "original" in toks
-
-    # Plataforma/linha do produto.
-    platforms = set()
-    if "ps5" in toks or "playstation" in toks:
-        platforms.add("ps5")
-    if "ps4" in toks:
-        platforms.add("ps4")
-    if "xbox" in toks:
-        platforms.add("xbox")
-    if "switch" in toks or "nintendo" in toks:
-        platforms.add("switch")
+    conditions = set()
+    if re.search(r"\b(original|genuino|genuína|genuina)\b", n):
+        conditions.add("original")
+    if re.search(r"\b(compativel|compatível)\b", n):
+        conditions.add("compativel")
+    if re.search(r"\b(generico|genérico)\b", n):
+        conditions.add("generico")
+    if re.search(r"\b(paralelo)\b", n):
+        conditions.add("paralelo")
+    if re.search(r"\b(usado|seminovo|semi novo)\b", n):
+        conditions.add("usado")
+    if re.search(r"\b(novo|lacrado)\b", n):
+        conditions.add("novo")
 
     return {
-        "tokens": toks, "brands": brands, "colors": colors,
-        "capacities": capacities, "models": models,
-        "condition": condition, "compatible": compatible,
-        "original": original, "platforms": platforms
+        "norm": n,
+        "tokens": toks,
+        "brands": brands,
+        "colors": colors,
+        "platforms": platforms,
+        "models": models,
+        "ids": {x.upper() for x in ids},
+        "capacities": capacities,
+        "conditions": conditions,
     }
 
-def _jds_v3_query_requirements(query):
-    f = _jds_v3_features(query)
-    toks = f["tokens"]
-    # Marca/modelo/variante explicitamente pedidos na pesquisa são restrições.
+def _jds_v4_query_requirements(query):
+    f = _jds_v4_features(query)
+    n = f["norm"]
+
+    # "controle de PS5" identifica a plataforma, mas NÃO inventa Sony.
+    # "Sony" só é obrigatório quando aparece na consulta.
     return f
 
-def _jds_v3_identifier(item):
-    # IDs de produto são evidência mais forte que semelhança textual.
-    for k in ("gtin","ean","mpn","asin","sku","productId","product_id","itemId","item_id"):
-        v = str(item.get(k) or "").strip().lower()
-        if v:
-            return k, v
-    return None
+def _jds_v4_same_product(query, a, b=None):
+    # Aceita tanto (query, a, b) quanto (a, b) para compatibilidade
+    # com chamadas antigas do projeto.
+    if b is None:
+        b = a
+        a = query
+        query = ""
 
-def _jds_v3_same_product(ref, cand, consulta=""):
-    """Retorna True somente quando há evidência suficiente de identidade."""
-    rt = ref.get("titulo") if isinstance(ref, dict) else ref
-    ct = cand.get("titulo") if isinstance(cand, dict) else cand
-    if not rt or not ct:
-        return False
+    fq = _jds_v4_query_requirements(query)
+    fa = _jds_v4_features(a)
+    fb = _jds_v4_features(b)
 
-    r = _jds_v3_features(rt)
-    c = _jds_v3_features(ct)
-    q = _jds_v3_query_requirements(consulta)
+    def conflict_sets(x, y):
+        return bool(x and y and x.isdisjoint(y))
 
-    # Conflitos fundamentais.
-    if r["platforms"] and c["platforms"] and not (r["platforms"] & c["platforms"]):
-        return False
-    if r["brands"] and not (r["brands"] & c["brands"]):
-        return False
-    if r["models"] and not r["models"].issubset(c["tokens"]):
-        return False
-    if r["capacities"] and not r["capacities"].issubset(c["capacities"]):
-        return False
-    if r["colors"] and not (r["colors"] & c["colors"]):
-        return False
-
-    # A consulta também impõe restrições. Isso evita transformar
-    # "Sony" em "qualquer controle PS5", por exemplo.
-    if q["brands"] and not q["brands"].issubset(c["brands"]):
-        return False
-    if q["models"] and not q["models"].issubset(c["tokens"]):
-        return False
-    if q["capacities"] and not q["capacities"].issubset(c["capacities"]):
-        return False
-    if q["colors"] and not (q["colors"] & c["colors"]):
-        return False
-    if q["platforms"] and not q["platforms"].issubset(c["platforms"]):
-        return False
-
-    # Original/genérico/compatível são categorias distintas quando
-    # a pesquisa ou referência deixa isso explícito.
-    if (q["original"] or r["original"]) and c["compatible"]:
-        return False
-    if q["compatible"] and not c["compatible"]:
-        return False
-
-    # Se a referência é claramente compatível/genérica, não pode virar original.
-    if r["compatible"] != c["compatible"]:
-        return False
-
-    # Identificador igual = confirmação forte.
-    ri = _jds_v3_identifier(ref) if isinstance(ref, dict) else None
-    ci = _jds_v3_identifier(cand) if isinstance(cand, dict) else None
-    if ri and ci and ri[0] == ci[0] and ri[1] == ci[1]:
+    # IDs fortes: se ambos têm o mesmo identificador, confirmação forte.
+    common_ids = fa["ids"] & fb["ids"]
+    if common_ids:
         return True
 
-    # Sem ID, exige sinais fortes suficientes.
-    common = r["tokens"] & c["tokens"]
-    ignored = {
-        "controle","sem","fio","wireless","bluetooth","com","para","de",
-        "do","da","ps5","playstation","novo","original","branco","white",
-        "preto","black","produto","oficial","nacional"
-    }
-    strong_r = {x for x in (r["brands"] | r["models"] | r["capacities"] | r["colors"]) if x}
-    strong_common = strong_r & common
+    # Se os IDs fortes existem e são diferentes, não é o mesmo item.
+    if fa["ids"] and fb["ids"] and fa["ids"].isdisjoint(fb["ids"]):
+        return False
 
-    # Para Sony DualSense, por exemplo, "sony" + "dualsense" precisam aparecer.
-    if len(strong_r) >= 2:
-        if len(strong_common) < len(strong_r):
+    # Tudo que o usuário especificou precisa aparecer/ser compatível nos dois.
+    if fq["brands"] and (not fq["brands"] <= fa["brands"] or not fq["brands"] <= fb["brands"]):
+        return False
+    if fq["models"] and (not fq["models"] <= fa["models"] or not fq["models"] <= fb["models"]):
+        return False
+    if fq["platforms"] and (not fq["platforms"] <= fa["platforms"] or not fq["platforms"] <= fb["platforms"]):
+        return False
+    if fq["colors"] and (not fq["colors"] <= fa["colors"] or not fq["colors"] <= fb["colors"]):
+        return False
+    if fq["capacities"] and (not fq["capacities"] <= fa["capacities"] or not fq["capacities"] <= fb["capacities"]):
+        return False
+
+    # Conflitos entre ofertas.
+    if conflict_sets(fa["brands"], fb["brands"]):
+        return False
+    if conflict_sets(fa["models"], fb["models"]):
+        return False
+    if conflict_sets(fa["platforms"], fb["platforms"]):
+        return False
+    if conflict_sets(fa["colors"], fb["colors"]):
+        return False
+    if conflict_sets(fa["capacities"], fb["capacities"]):
+        return False
+
+    # Condição: "compatível" não pode ser confundido com original/genuíno.
+    if ("original" in fa["conditions"] and "compativel" in fb["conditions"]) or \
+       ("original" in fb["conditions"] and "compativel" in fa["conditions"]):
+        return False
+
+    # Quando a consulta exige Sony/original, uma oferta explicitamente
+    # "compatível" ou "genérica" fica fora.
+    if fq["brands"] or "original" in fq["conditions"]:
+        if "compativel" in fa["conditions"] or "generico" in fa["conditions"]:
             return False
-    elif len(strong_r) == 1:
-        # Um único sinal forte exige boa sobreposição geral.
-        meaningful_r = r["tokens"] - ignored
-        meaningful_c = c["tokens"] - ignored
-        if not meaningful_r or len(meaningful_r & meaningful_c) / max(1, len(meaningful_r)) < 0.75:
+        if "compativel" in fb["conditions"] or "generico" in fb["conditions"]:
             return False
-    else:
-        # Pesquisa genérica sem marca/modelo: não fazemos falsa equivalência
-        # só porque ambos são da mesma categoria.
-        meaningful_r = r["tokens"] - ignored
-        meaningful_c = c["tokens"] - ignored
-        if len(meaningful_r & meaningful_c) < 2:
+
+    # Se há modelo explícito na consulta, ambos precisam apresentar o modelo.
+    if fq["models"]:
+        if not (fq["models"] <= fa["models"] and fq["models"] <= fb["models"]):
+            return False
+
+    # Se a consulta não tem marca/modelo, exigimos sobreposição de identidade
+    # para evitar comparar dois produtos genéricos apenas por categoria.
+    if not fq["brands"] and not fq["models"]:
+        identity_overlap = (
+            bool(fa["brands"] & fb["brands"]) or
+            bool(fa["models"] & fb["models"]) or
+            bool(fa["platforms"] & fb["platforms"] and
+                 ("dualsense" in fa["models"] or "dualsense" in fb["models"]))
+        )
+        # Para produtos sem marca/modelo, o motor não força equivalência.
+        if not identity_overlap and (fa["conditions"] != fb["conditions"]):
             return False
 
     return True
 
-# Substitui a validação V2 pela V3.
-_jds_mesmo_produto = _jds_v3_same_product
-
-print("[JDS] Product Matcher V3 carregado — identidade conservadora")
+# Chamadas do app são (titulo_ref, titulo_cand, consulta), não (consulta, a, b).
+def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
+    ra = ref_titulo.get("titulo") if isinstance(ref_titulo, dict) else ref_titulo
+    rb = cand_titulo.get("titulo") if isinstance(cand_titulo, dict) else cand_titulo
+    return _jds_v4_same_product(consulta or "", ra, rb)
 
 
 if __name__ == "__main__":
