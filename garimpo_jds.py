@@ -1355,6 +1355,11 @@ def _preco_plausivel(termo, preco, titulo, pais="BR"):
     if any(k in tlow for k in ("cabo", "carregador")):
         piso = 5.0 if _normalizar_pais(pais) == "US" else 5.0
         teto = max(teto, 200.0)
+    tit = _sem_acento(titulo or "")
+    if any(k in tlow for k in ("whey", "protein", "proteina")) and any(
+        x in tit for x in ("900g", "1kg", "2kg", "pote")
+    ):
+        piso = max(piso, 45.0 if _normalizar_pais(pais) == "BR" else 12.0)
     return piso <= preco <= teto
 
 
@@ -2004,7 +2009,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v33:" + pais + ":" + _termo_cache_norm(termo)
+    return "v34:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -4923,6 +4928,11 @@ def executar_testes_unitarios():
             "BR",
         ) != 24.99,
         "Kindle R$ 2.499 não vira R$ 24,99",
+    )
+    checar(
+        not _preco_plausivel("whey protein", 24.37, "100% Whey Crush 900g Under Labz")
+        and _preco_plausivel("whey protein", 63.79, "Mega Whey Protein Iridium 900g"),
+        "pote 900g a R$ 24 não passa como whey",
     )
     checar(
         _titulos_mesmo_produto(
