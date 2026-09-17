@@ -45,7 +45,7 @@ from garimpo_jds import (  # noqa: E402
 
 app = FastAPI(
     title="JDS Economiza API",
-    version="1.3.0",
+    version="1.3.1",
     description="Garimpa o menor preço no Google (Serper): BR (Amazon/ML/Shopee) ou US (Amazon/eBay).",
 )
 app.add_middleware(
@@ -225,6 +225,7 @@ def health():
         "ok": True,
         "servico": "jds-economiza",
         "fonte": "serper",
+        "deploy": "v38",
         "mercados": ["BR", "US"],
         "afiliados": {
             "amazon_br": ID_AMAZON,
