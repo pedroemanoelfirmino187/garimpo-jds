@@ -376,7 +376,7 @@ def serializar_oferta_app(item, pais="BR"):
     else:
         texto = _formatar_preco(numero, pais=pais)
     href = aplicar_afiliado_por_dominio(
-        p.get("url") or p.get("link") or p.get("link_afiliado") or ""
+        _link_ver_oferta(p) or p.get("url") or p.get("link") or p.get("link_afiliado") or ""
     )
     imagem = (p.get("foto") or p.get("imagem") or p.get("image") or "").strip()
     if imagem.startswith("//"):
@@ -706,6 +706,11 @@ def _url_canonica_loja(url, plat, pais="BR"):
     return href
 
 
+def _url_e_google(url):
+    """True se o clique cairia no Google, não na loja."""
+    return "google." in (url or "").lower()
+
+
 def _url_e_busca_loja(url):
     """True se o link é barra de pesquisa da loja (/search, ?q=, keyword=, ranking…)."""
     bruto = (url or "").strip()
@@ -772,7 +777,7 @@ def _link_compra_do_card(produto):
     if fonte == "busca_loja":
         return aplicar_afiliado_por_dominio(url) if url.startswith("http") else url
     url = _desempacotar_link_google(url) or url
-    if _url_e_busca_loja(url):
+    if _url_e_google(url) or _url_e_busca_loja(url):
         url = ""
     url = _url_canonica_loja(url, plat, pais=pais)
     if _url_anuncio_exato(url, plat) and fonte != "catalogo":
@@ -786,7 +791,15 @@ def _link_compra_do_card(produto):
     if fonte != "catalogo":
         if _url_anuncio_exato(url, plat):
             return aplicar_afiliado_por_dominio(url)
-        return aplicar_afiliado_por_dominio(url) if url.startswith("http") and not _url_e_busca_loja(url) else ""
+        if url.startswith("http") and not _url_e_busca_loja(url) and not _url_e_google(url):
+            return aplicar_afiliado_por_dominio(url)
+        if plat == "amazon":
+            return _link_busca_amazon_us(q) if pais == "US" else _link_busca_amazon(q)
+        if plat == "mercado_livre":
+            return _link_busca_ml(q)
+        if plat == "shopee":
+            return _link_busca_shopee(_consulta_shopee(produto))
+        return ""
     if pais == "US":
         if plat == "amazon":
             return aplicar_tag_amazon_eua(url or _link_busca_amazon_us(q))
@@ -812,7 +825,7 @@ def _link_ver_oferta(produto):
         return _link_compra_do_card(p)
     for bruto in (p.get("url"), p.get("link"), p.get("link_afiliado")):
         h = _desempacotar_link_google((bruto or "").strip()) or (bruto or "").strip()
-        if _url_e_busca_loja(h):
+        if _url_e_google(h) or _url_e_busca_loja(h):
             continue
         can = _url_canonica_loja(h, plat, pais=pais)
         if _url_anuncio_exato(can, plat):
@@ -1129,6 +1142,16 @@ def _titulo_usado(titulo):
     )
 
 
+def _titulo_indisponivel(titulo):
+    t = _sem_acento(titulo or "")
+    return any(
+        x in t for x in (
+            "nao disponivel", "indisponivel", "sem estoque", "esgotado",
+            "fora de estoque", "unavailable",
+        )
+    )
+
+
 def _parece_url_conteudo(url):
     u = (url or "").lower()
     return any(
@@ -1185,6 +1208,8 @@ def _titulo_shopping_ok(termo, titulo):
     if _parece_acessorio_barato(titulo, termo):
         return False
     if _titulo_usado(titulo):
+        return False
+    if _titulo_indisponivel(titulo):
         return False
     toks = _tokens_busca(termo)
     if not toks:
@@ -2009,7 +2034,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v34:" + pais + ":" + _termo_cache_norm(termo)
+    return "v35:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2982,7 +3007,7 @@ def _href_organico_anuncio(it):
     return ""
 
 
-def _colar_anuncio_organico(item, organicos, termo, pais="BR"):
+def _colar_anuncio_organico(item, organicos, termo, pais="BR", exigir_mesmo=True):
     """Troca o card Google Shopping pelo /dp/ /p/ /itm da mesma loja e do mesmo produto."""
     if not item:
         return item
@@ -2999,7 +3024,10 @@ def _colar_anuncio_organico(item, organicos, termo, pais="BR"):
             continue
         if pais == "US" and plat == "amazon" and not _host_amazon_eua(href):
             continue
-        if not _titulos_mesmo_produto(termo, titulo_card, tit):
+        if exigir_mesmo:
+            if not _titulos_mesmo_produto(termo, titulo_card, tit):
+                continue
+        elif not _titulo_shopping_ok(termo, tit):
             continue
         can = _url_canonica_loja(href, plat, pais=pais)
         item["url"] = _aplicar_afiliado_google(can, plat, pais=pais)
@@ -3008,19 +3036,24 @@ def _colar_anuncio_organico(item, organicos, termo, pais="BR"):
 
 
 def _resolver_links_anuncio_serper(termo, ofertas, pais="BR"):
-    """Uma orgânica do termo + no máximo 2 pelo título do card ainda no Google."""
+    """Orgânica do termo + busca do título na Amazon para achar o /dp/ com o ID JDS."""
     pais = _normalizar_pais(pais)
     if not ofertas:
         return ofertas
     organicos = _organic_serper(termo, pais=pais)
     saida = [_colar_anuncio_organico(dict(o), organicos, termo, pais=pais) for o in ofertas]
-    pendentes = [
-        o for o in saida
-        if not _url_anuncio_exato(o.get("url"), o.get("plataforma"))
-    ]
-    for o in pendentes[:2]:
-        extra = _organic_serper(o.get("titulo") or termo, pais=pais)
+    for o in saida:
+        plat = o.get("plataforma")
+        if _url_anuncio_exato(o.get("url"), plat):
+            continue
+        tit = (o.get("titulo") or termo).strip()
+        extra = _organic_serper(tit, pais=pais)
         _colar_anuncio_organico(o, extra, termo, pais=pais)
+        if plat == "amazon" and not _url_anuncio_exato(o.get("url"), "amazon"):
+            extra_amz = _organic_serper(f"{tit} amazon", pais=pais)
+            _colar_anuncio_organico(
+                o, extra_amz, termo, pais=pais, exigir_mesmo=False,
+            )
     return saida
 
 
@@ -4971,6 +5004,13 @@ def executar_testes_unitarios():
         and "ibp=oshop" not in ver_colado
         and abs(float(colado.get("preco_num") or 0) - 330.00) < 0.05,
         "Ver Oferta abre o /dp/ da loja, não o Google Shopping",
+    )
+    ver_sem_dp = _link_ver_oferta(dict(oshop_card))
+    checar(
+        "amazon.com.br" in ver_sem_dp
+        and f"tag={ID_AMAZON}" in ver_sem_dp
+        and "google." not in ver_sem_dp,
+        "Amazon sem /dp/ abre a Amazon com o ID JDS, não o Google",
     )
     mais_barato_oshop = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
         {
