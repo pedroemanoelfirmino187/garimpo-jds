@@ -1275,7 +1275,15 @@ def _parece_acessorio_barato(titulo, termo=""):
     ):
         return True
     if any(k in tl for k in ("airpods", "airpod")) and any(
-        x in t for x in ("charging case only", "case only", "ear tips", "capa para airpods")
+        x in t for x in (
+            "charging case only", "case only", "ear tips", "capa para airpods",
+            "esquerdo", "direito", "somente", "unico para", "um lado",
+            "reposicao", "replacement", "left ear", "right ear",
+        )
+    ):
+        return True
+    if any(k in tl for k in ("echo", "alexa")) and (
+        "relogio" in t or ("caixa de som" in t and "alexa" not in t)
     ):
         return True
     return any(
@@ -1298,6 +1306,10 @@ def _faixa_preco(termo, pais="BR"):
         return (35.0, 280.0) if us else (320.0, 1600.0)
     if any(k in t for k in ("airpods", "airpod")):
         return (45.0, 450.0) if us else (250.0, 2500.0)
+    if any(k in t for k in ("echo", "alexa")):
+        return (80.0, 450.0) if us else (180.0, 900.0)
+    if any(k in t for k in ("kindle", "e-reader", "ereader", "e reader")):
+        return (40.0, 700.0) if us else (350.0, 4500.0)
     if "iphone" in t:
         return (180.0, 2500.0) if us else (1200.0, 12000.0)
     if any(k in t for k in ("redmi", "xiaomi", "galaxy", "smartphone", "celular")):
@@ -1326,7 +1338,7 @@ def _preco_plausivel(termo, preco, titulo, pais="BR"):
 
 
 def _normalizar_preco_mercado(n, termo, titulo, pais="BR"):
-    """Se o parse inflou 100x ($62.00 → 6200), tenta o valor real."""
+    """US: se o parse inflou 100x ($62.00 → 6200), volta o valor. BR não divide."""
     try:
         n = float(n)
     except (TypeError, ValueError):
@@ -1335,9 +1347,10 @@ def _normalizar_preco_mercado(n, termo, titulo, pais="BR"):
         return 0.0
     if _preco_plausivel(termo, n, titulo, pais=pais):
         return n
-    cand = round(n / 100.0, 2)
-    if cand > 0 and _preco_plausivel(termo, cand, titulo, pais=pais):
-        return cand
+    if _normalizar_pais(pais) == "US":
+        cand = round(n / 100.0, 2)
+        if cand > 0 and _preco_plausivel(termo, cand, titulo, pais=pais):
+            return cand
     return 0.0
 
 
@@ -1886,6 +1899,10 @@ def _obter_preco_base_categoria(termo):
         return 349.90
     elif any(k in t_low for k in ["bicicleta", "bike"]):
         return 699.0
+    elif any(k in t_low for k in ["kindle", "e-reader", "ereader"]):
+        return 899.0
+    elif any(k in t_low for k in ["echo", "alexa"]):
+        return 349.0
     elif any(k in t_low for k in ["whey", "creatina", "suplemento"]):
         return 89.90
     elif any(k in t_low for k in ["perfume", "fragrancia"]):
@@ -1966,7 +1983,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v31:" + pais + ":" + _termo_cache_norm(termo)
+    return "v32:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -4766,6 +4783,31 @@ def executar_testes_unitarios():
         and abs(float(exato_barato[0].get("preco_num") or 0) - 404.27) < 0.05
         and "dualsense" in _sem_acento(exato_barato[0].get("titulo") or ""),
         "na lista da Serper o mais barato só ganha se for o produto exato",
+    )
+    checar(
+        not _titulo_shopping_ok(
+            "airpods",
+            "Fone de ouvido único para fone de ouvido esquerdo Apple Airpods Pro",
+        )
+        and _titulo_shopping_ok("airpods", "Apple AirPods 4 com estojo de carregamento"),
+        "AirPods de um lado só não substitui o fone completo",
+    )
+    checar(
+        not _titulo_shopping_ok("echo dot", "Relógio Led Echo Dot 2025 4a Geração Preto"),
+        "relógio LED não passa como Echo Dot",
+    )
+    checar(
+        abs(_normalizar_preco_mercado(
+            2499.0, "kindle",
+            "Amazon Kindle Scribe 16GB Tela 11",
+            "BR",
+        ) - 2499.0) < 0.05
+        and _normalizar_preco_mercado(
+            2499.0, "kindle",
+            "Amazon Kindle Scribe 16GB Tela 11",
+            "BR",
+        ) != 24.99,
+        "Kindle R$ 2.499 não vira R$ 24,99",
     )
     mais_barato_oshop = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
         {
