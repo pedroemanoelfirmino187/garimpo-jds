@@ -1200,6 +1200,27 @@ def _titulo_shopping_ok(termo, titulo):
     return _termo_contido_no_titulo(termo, titulo)
 
 
+_STOP_TITULO_FORTE = {
+    "controle", "sem", "para", "com", "wireless", "preto", "branco", "original",
+    "oficial", "novo", "nova", "kit", "pack", "geracao", "geracao", "series",
+}
+
+
+def _titulos_mesmo_produto(busca, titulo_card, titulo_loja):
+    """Não cola o /dp/ da Sony no card Gamrombo só porque os dois são PS5."""
+    if not _titulo_shopping_ok(busca, titulo_loja):
+        return False
+    ts = _sem_acento(titulo_card or "")
+    to = _sem_acento(titulo_loja or "")
+    toks = [
+        w for w in re.findall(r"[a-z0-9]+", ts)
+        if len(w) > 3 and w not in _STOPWORDS_BUSCA and w not in _STOP_TITULO_FORTE
+    ]
+    if toks:
+        return any(_token_no_titulo(w, to) for w in toks[:6])
+    return _termo_contido_no_titulo(busca, titulo_loja)
+
+
 def _termo_contido_no_titulo(termo, titulo):
     """Ex.: 'controle ps5' precisa aparecer no título (com sinônimos)."""
     toks = _tokens_busca(termo)
@@ -1983,7 +2004,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v32:" + pais + ":" + _termo_cache_norm(termo)
+    return "v33:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2912,6 +2933,92 @@ def _consultas_serper_fallback(termo, pais="BR"):
     return [f"{q} amazon", f"{q} mercado livre", f"{q} shopee"]
 
 
+def _q_serper_da_loja(termo, plat):
+    q = _consulta_serper_shopping(termo)
+    nomes = {
+        "amazon": "amazon",
+        "mercado_livre": "mercado livre",
+        "shopee": "shopee",
+        "ebay": "ebay",
+    }
+    extra = nomes.get(plat) or ""
+    return f"{q} {extra}".strip() if extra else q
+
+
+def _link_e_google_shopping(url):
+    u = (url or "").lower()
+    return "google." in u and ("ibp=oshop" in u or "prds=" in u or "/shopping/" in u)
+
+
+def _organic_serper(q, pais="BR", num=12):
+    """Busca orgânica Serper (não Shopping). Sem site: no q; a loja filtra no JSON."""
+    loc = _serper_locale(pais)
+    q = _consulta_serper_shopping(q)
+    if not q:
+        return []
+    dados = _serper_post("/search", {
+        "q": q, "gl": loc["gl"], "hl": loc["hl"], "num": min(int(num or 10), 20),
+    })
+    if not isinstance(dados, dict):
+        return []
+    return [it for it in (dados.get("organic") or []) if isinstance(it, dict)]
+
+
+def _href_organico_anuncio(it):
+    if not isinstance(it, dict):
+        return ""
+    h = _href_item_serper(it)
+    if h and _url_anuncio_exato(h, _plataforma_loja(h)):
+        return h
+    h = _desempacotar_link_google(str(it.get("link") or it.get("url") or ""))
+    plat = _plataforma_loja(h)
+    if plat and _url_anuncio_exato(h, plat):
+        return h
+    return ""
+
+
+def _colar_anuncio_organico(item, organicos, termo, pais="BR"):
+    """Troca o card Google Shopping pelo /dp/ /p/ /itm da mesma loja e do mesmo produto."""
+    if not item:
+        return item
+    pais = _normalizar_pais(pais)
+    plat = item.get("plataforma")
+    url = item.get("url") or ""
+    if _url_anuncio_exato(url, plat):
+        return item
+    titulo_card = item.get("titulo") or ""
+    for it in organicos or []:
+        tit = str(it.get("title") or "")
+        href = _href_organico_anuncio(it)
+        if not href or _plataforma_loja(href) != plat:
+            continue
+        if pais == "US" and plat == "amazon" and not _host_amazon_eua(href):
+            continue
+        if not _titulos_mesmo_produto(termo, titulo_card, tit):
+            continue
+        can = _url_canonica_loja(href, plat, pais=pais)
+        item["url"] = _aplicar_afiliado_google(can, plat, pais=pais)
+        return item
+    return item
+
+
+def _resolver_links_anuncio_serper(termo, ofertas, pais="BR"):
+    """Uma orgânica do termo + no máximo 2 pelo título do card ainda no Google."""
+    pais = _normalizar_pais(pais)
+    if not ofertas:
+        return ofertas
+    organicos = _organic_serper(termo, pais=pais)
+    saida = [_colar_anuncio_organico(dict(o), organicos, termo, pais=pais) for o in ofertas]
+    pendentes = [
+        o for o in saida
+        if not _url_anuncio_exato(o.get("url"), o.get("plataforma"))
+    ]
+    for o in pendentes[:2]:
+        extra = _organic_serper(o.get("titulo") or termo, pais=pais)
+        _colar_anuncio_organico(o, extra, termo, pais=pais)
+    return saida
+
+
 def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR"):
     """
     Cache → POST Serper Shopping → lojas do país → preço float → menor preço no topo.
@@ -2958,23 +3065,31 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
     ]
     ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite, pais=pais)
     qs_usadas = [q]
+    presentes = {o.get("plataforma") for o in ofertas}
+    faltando = [p for p in _lojas_do_pais(pais) if p not in presentes]
+    qs_extra = []
     if not ofertas:
-        for q2 in _consultas_serper_fallback(t, pais=pais):
-            if q2 == q:
-                continue
-            http2, cru2, _, erro2 = _post_serper_shopping(q2, pais=pais, num=limite)
-            if erro2 or http2 >= 400 or not cru2:
-                continue
-            qs_usadas.append(q2)
-            cru.extend(cru2)
-            extra = [
-                it for it in cru2
-                if _source_loja_oficial(str(it.get("source") or it.get("domain") or ""), pais=pais)
-            ]
-            shopping.extend(extra)
-            ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite, pais=pais)
+        qs_extra = [q2 for q2 in _consultas_serper_fallback(t, pais=pais) if q2 != q]
+    elif faltando:
+        qs_extra = [_q_serper_da_loja(t, p) for p in faltando]
+    for q2 in qs_extra:
+        if not q2 or q2 in qs_usadas:
+            continue
+        http2, cru2, _, erro2 = _post_serper_shopping(q2, pais=pais, num=limite)
+        if erro2 or http2 >= 400 or not cru2:
+            continue
+        qs_usadas.append(q2)
+        cru.extend(cru2)
+        extra = [
+            it for it in cru2
+            if _source_loja_oficial(str(it.get("source") or it.get("domain") or ""), pais=pais)
+        ]
+        shopping.extend(extra)
+        ofertas = _ofertas_de_itens_serper(t, shopping, limite=limite, pais=pais)
+        if not faltando:
             if ofertas:
                 break
+    ofertas = _resolver_links_anuncio_serper(t, ofertas, pais=pais)
     ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
     _ULTIMO_DIAG_SERPER.clear()
     _ULTIMO_DIAG_SERPER.update({
@@ -4808,6 +4923,44 @@ def executar_testes_unitarios():
             "BR",
         ) != 24.99,
         "Kindle R$ 2.499 não vira R$ 24,99",
+    )
+    checar(
+        _titulos_mesmo_produto(
+            "controle ps5",
+            "Gamrombo Controle LED PS5",
+            "Gamrombo Controle sem fio LED para PS5",
+        )
+        and not _titulos_mesmo_produto(
+            "controle ps5",
+            "Gamrombo Controle LED PS5",
+            "PlayStation DualSense Controle sem fio PS5 Sony",
+        ),
+        "não cola o DualSense no card Gamrombo",
+    )
+    oshop_card = _ofertas_de_itens_serper("controle ps5", [{
+        "title": "Gamrombo Controle LED PS5",
+        "source": "Amazon.com.br - Seller",
+        "price": "R$ 330,00",
+        "link": "https://www.google.com/search?ibp=oshop&q=controle+ps5&prds=catalogid:1",
+        "imageUrl": "https://encrypted-tbn0.gstatic.com/shopping?q=tbn:barato",
+    }])[0]
+    colado = _colar_anuncio_organico(
+        dict(oshop_card),
+        [{
+            "title": "Gamrombo Controle sem fio LED para PS5",
+            "link": "https://www.amazon.com.br/dp/B0GAMROMB0",
+            "source": "Amazon.com.br",
+        }],
+        "controle ps5",
+        pais="BR",
+    )
+    ver_colado = _link_ver_oferta(colado)
+    checar(
+        "/dp/B0GAMROMB0" in (colado.get("url") or "")
+        and "/dp/B0GAMROMB0" in ver_colado
+        and "ibp=oshop" not in ver_colado
+        and abs(float(colado.get("preco_num") or 0) - 330.00) < 0.05,
+        "Ver Oferta abre o /dp/ da loja, não o Google Shopping",
     )
     mais_barato_oshop = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
         {
