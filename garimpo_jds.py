@@ -764,34 +764,41 @@ def _url_anuncio_exato(url, plat):
     return False
 
 
-def _amazon_dualsense_oficial(produto, pais="BR"):
-    """Busca DualSense: ficha Sony /dp/, nunca genérico paralelo."""
+def _link_do_item_serper_card(produto):
+    """O link do próprio item da Serper, com afiliado. Não troca o produto."""
     p = produto if isinstance(produto, dict) else {}
-    termo = _sem_acento(p.get("termo_busca") or "")
-    titulo = _sem_acento(p.get("titulo") or "")
-    blob = f"{termo} {titulo}"
-    if "dualsense" not in blob and "dual sense" not in blob:
-        return ""
-    if any(x in titulo for x in ("gamrombo", "knup", "lenisuole", "paralelo", "compativel com")):
-        return ""
-    pais = _normalizar_pais(pais)
-    if pais == "US":
-        return aplicar_tag_amazon_eua(f"https://www.amazon.com/dp/{ASIN_DUALSENSE}")
-    return _aplicar_afiliado_google(
-        f"https://www.amazon.com.br/dp/{ASIN_DUALSENSE}", "amazon", pais=pais,
-    )
+    plat = p.get("plataforma") or _plataforma_loja(p.get("url") or "")
+    pais = _normalizar_pais(p.get("pais") or "BR")
+    google_vis = ""
+    for bruto in (p.get("url"), p.get("link"), p.get("link_afiliado")):
+        h = (bruto or "").strip()
+        if not h:
+            continue
+        h = _desempacotar_link_google(h) or h
+        if not h.startswith("http"):
+            continue
+        if _url_e_busca_loja(h):
+            continue
+        if _url_e_google(h):
+            google_vis = h.split("#")[0]
+            continue
+        can = _url_canonica_loja(h, plat or _plataforma_loja(h), pais=pais)
+        return aplicar_afiliado_por_dominio(can)
+    return google_vis
 
 
 def _link_compra_do_card(produto):
-    """Ver Oferta: anúncio direto do produto. Busca da loja só em catálogo/fallback."""
-    plat = (produto or {}).get("plataforma")
-    url = (produto or {}).get("url") or (produto or {}).get("link_afiliado") or ""
-    pais = _normalizar_pais((produto or {}).get("pais") or "BR")
-    fonte = ((produto or {}).get("fonte") or "").lower()
-    q = _consulta_do_card(produto)
-    oficial = _amazon_dualsense_oficial(produto, pais)
-    if plat == "amazon" and oficial:
-        return oficial
+    """Ver Oferta: link do item. Busca da loja só em catálogo/fallback."""
+    p = produto or {}
+    plat = p.get("plataforma")
+    url = p.get("url") or p.get("link_afiliado") or ""
+    pais = _normalizar_pais(p.get("pais") or "BR")
+    fonte = (p.get("fonte") or "").lower()
+    q = _consulta_do_card(p)
+    if fonte != "catalogo" and fonte != "busca_loja":
+        direto = _link_do_item_serper_card(p)
+        if direto:
+            return direto
     if fonte == "busca_loja":
         return aplicar_afiliado_por_dominio(url) if url.startswith("http") else url
     url = _desempacotar_link_google(url) or url
@@ -800,12 +807,6 @@ def _link_compra_do_card(produto):
     url = _url_canonica_loja(url, plat, pais=pais)
     if _url_anuncio_exato(url, plat) and fonte != "catalogo":
         return aplicar_afiliado_por_dominio(url)
-    if plat == "amazon" and _asin_amazon(url) == ASIN_DUALSENSE:
-        if pais == "US" or _host_amazon_eua(url):
-            return aplicar_tag_amazon_eua(url)
-        return _aplicar_afiliado_google(
-            f"https://www.amazon.com.br/dp/{ASIN_DUALSENSE}", "amazon",
-        )
     if fonte != "catalogo":
         if _url_anuncio_exato(url, plat):
             return aplicar_afiliado_por_dominio(url)
@@ -816,7 +817,7 @@ def _link_compra_do_card(produto):
         if plat == "mercado_livre":
             return _link_busca_ml(q)
         if plat == "shopee":
-            return _link_busca_shopee(_consulta_shopee(produto))
+            return _link_busca_shopee(_consulta_shopee(p))
         return ""
     if pais == "US":
         if plat == "amazon":
@@ -829,28 +830,19 @@ def _link_compra_do_card(produto):
     if plat == "mercado_livre":
         return _link_busca_ml(q)
     if plat == "shopee":
-        return _link_busca_shopee(_consulta_shopee(produto))
+        return _link_busca_shopee(_consulta_shopee(p))
     return aplicar_afiliado_por_dominio(url)
 
 
 def _link_ver_oferta(produto):
-    """Ver Oferta: página do anúncio mais barato daquele card, já com afiliado."""
+    """Ver Oferta: o link do produto da Serper (ou catálogo), já com afiliado."""
     p = produto if isinstance(produto, dict) else {}
-    plat = p.get("plataforma") or _plataforma_loja(p.get("url") or "")
-    pais = _normalizar_pais(p.get("pais") or "BR")
     fonte = (p.get("fonte") or "").lower()
-    if fonte == "catalogo":
+    if fonte in {"catalogo", "busca_loja"}:
         return _link_compra_do_card(p)
-    oficial = _amazon_dualsense_oficial(p, pais)
-    if plat == "amazon" and oficial:
-        return oficial
-    for bruto in (p.get("url"), p.get("link"), p.get("link_afiliado")):
-        h = _desempacotar_link_google((bruto or "").strip()) or (bruto or "").strip()
-        if _url_e_google(h) or _url_e_busca_loja(h):
-            continue
-        can = _url_canonica_loja(h, plat, pais=pais)
-        if _url_anuncio_exato(can, plat):
-            return aplicar_afiliado_por_dominio(can)
+    direto = _link_do_item_serper_card(p)
+    if direto:
+        return direto
     return _link_compra_do_card(p)
 
 
@@ -2055,7 +2047,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v36:" + pais + ":" + _termo_cache_norm(termo)
+    return "v37:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -3146,7 +3138,6 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
         if not faltando:
             if ofertas:
                 break
-    ofertas = _resolver_links_anuncio_serper(t, ofertas, pais=pais)
     ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
     _ULTIMO_DIAG_SERPER.clear()
     _ULTIMO_DIAG_SERPER.update({
@@ -5026,10 +5017,10 @@ def executar_testes_unitarios():
     )
     ver_sem_dp = _link_ver_oferta(dict(oshop_card))
     checar(
-        "amazon.com.br" in ver_sem_dp
-        and f"tag={ID_AMAZON}" in ver_sem_dp
-        and "google." not in ver_sem_dp,
-        "Amazon sem /dp/ abre a Amazon com o ID JDS, não o Google",
+        ver_sem_dp.startswith("http")
+        and "/s?" not in ver_sem_dp
+        and "price-asc-rank" not in ver_sem_dp,
+        "sem /dp/ no JSON, Ver Oferta não inventa busca Amazon de paralelo",
     )
     mais_barato_oshop = _ordenar_entrega_menor_preco(_ofertas_de_itens_serper("controle ps5", [
         {
@@ -5532,26 +5523,26 @@ def executar_testes_unitarios():
     amz_google = _montar_item_oferta(
         "PlayStation DualSense Controle sem fio",
         404.27,
-        "https://www.google.com/search?ibp=oshop&q=dualsense",
+        "https://www.amazon.com.br/dp/B0CQKLS4RP",
         FOTO_PADRAO,
         "amazon",
     )
-    amz_google["termo_busca"] = "dualsense"
     ver_ds = _link_ver_oferta(amz_google)
     checar(
         f"/dp/{ASIN_DUALSENSE}" in ver_ds and "google." not in ver_ds and "/s?" not in ver_ds,
-        "DualSense na Amazon abre /dp/ Sony, não Google nem paralelo",
+        "Serper /dp/ DualSense abre esse /dp/, não Google nem busca",
     )
     amz_paralelo = _montar_item_oferta(
         "PlayStation DualSense Controle sem fio",
         89.90,
-        "https://www.amazon.com.br/dp/B0PARALELO1",
+        "https://www.amazon.com.br/dp/B0PARALELO",
         FOTO_PADRAO,
         "amazon",
     )
     checar(
-        f"/dp/{ASIN_DUALSENSE}" in _link_ver_oferta(amz_paralelo),
-        " DualSense não abre ASIN de controle paralelo",
+        "B0PARALELO" in _link_ver_oferta(amz_paralelo)
+        and ASIN_DUALSENSE not in _link_ver_oferta(amz_paralelo),
+        "Ver Oferta abre o /dp/ do card da Serper, não troca o ASIN",
     )
     busca_shp = _aplicar_afiliado_google(
         "https://shopee.com.br/search?keyword=dualsense", "shopee"
