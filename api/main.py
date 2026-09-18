@@ -5,6 +5,7 @@ Busca só Serper.dev, mercado BR (pt) ou US (en).
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import sys
@@ -129,6 +130,13 @@ async def _capturar_pais(request: Request, call_next):
         return _json_erro(pais, 500, "erro_servidor")
 
 
+def _token_recebido(authorization: str | None, x_jds_token: str | None) -> str:
+    bearer = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer = authorization.split(" ", 1)[1].strip()
+    return (x_jds_token or bearer or "").strip()
+
+
 def _autorizar_app(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -138,16 +146,22 @@ def _autorizar_app(
     esperado = (os.environ.get("JDS_API_TOKEN") or "").strip()
     if not esperado:
         return True
-    bearer = ""
-    if authorization and authorization.lower().startswith("bearer "):
-        bearer = authorization.split(" ", 1)[1].strip()
-    recebido = (x_jds_token or bearer or "").strip()
-    if recebido != esperado:
+    recebido = _token_recebido(authorization, x_jds_token)
+    if not recebido or not hmac.compare_digest(recebido, esperado):
         raise HTTPException(
             status_code=401,
             detail=mensagem_servidor("token_invalido", _pais_do_request(request)),
         )
     return True
+
+
+def _autorizar_garimpar(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_jds_token: str | None = Header(default=None, alias="X-JDS-TOKEN"),
+):
+    """GET/POST /garimpar: 401 sem token ou com token errado quando JDS_API_TOKEN existe."""
+    return _autorizar_app(request, authorization=authorization, x_jds_token=x_jds_token)
 
 
 def _resposta_ofertas(termo, ofertas, pais="BR"):
@@ -225,7 +239,7 @@ def health():
         "ok": True,
         "servico": "jds-economiza",
         "fonte": "serper",
-        "deploy": "v41",
+        "deploy": "v43",
         "mercados": ["BR", "US"],
         "afiliados": {
             "amazon_br": ID_AMAZON,
@@ -258,7 +272,9 @@ def health():
 
 def _buscar_serper_pais(termo, pais):
     try:
-        return buscar_ofertas_por_pais(termo, pais=pais, usar_cache=True)
+        # A API pública entrega somente ofertas confirmadas pelo Product Matcher V4.
+        # Não usa o fallback "BUSCA NA LOJA" como se fosse uma oferta comparável.
+        return buscar_ofertas_serper_shopping(termo, usar_cache=True, pais=pais, limite=20)
     except Exception:
         raise HTTPException(
             status_code=500,
@@ -271,7 +287,7 @@ def garimpar_get(
     q: str = Query(..., min_length=1, max_length=120, description="Produto"),
     pais: str = Query("BR", max_length=16, description="BR ou US"),
     country: str | None = Query(None, max_length=16),
-    _: bool = Depends(_autorizar_app),
+    _: bool = Depends(_autorizar_garimpar),
 ):
     termo = q.strip()
     mercado = _normalizar_pais(country or pais)
@@ -280,8 +296,8 @@ def garimpar_get(
 
 
 @app.post("/garimpar")
-def garimpar_post(pedido: GarimpoPedido, _: bool = Depends(_autorizar_app)):
-    """Rota do app: corpo JSON com q e pais (BR|US), token opcional, Serper no servidor."""
+def garimpar_post(pedido: GarimpoPedido, _: bool = Depends(_autorizar_garimpar)):
+    """Rota do app: corpo JSON com q e pais (BR|US). Token obrigatório se JDS_API_TOKEN existir."""
     termo = pedido.q.strip()
     mercado = _pais_pedido(pedido)
     ofertas = _buscar_serper_pais(termo, mercado)

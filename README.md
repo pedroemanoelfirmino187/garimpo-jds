@@ -77,3 +77,45 @@ Scraping no servidor é bloqueado. Cole as chaves em **Railway → Variables** (
 No ar o motor pede o Google pela **Serper** (JSON, sem raspar). Sem essa chave o Google continua bloqueado no Railway. ZenRows/ScrapingAnt ficam de reserva.
 
 Depois do deploy, `/health` mostra `serper` como `true` quando `SERPER_API_KEY` está no Railway.
+
+## 6. Suíte de qualidade
+
+A suíte automatizada verifica o matcher, regras de identidade, integridade de
+oferta (título/preço/imagem/URL), URLs genéricas, API, autenticação e respostas
+vazias.
+
+```text
+python -m pytest -q
+```
+
+Ou:
+
+```text
+python scripts/quality_check.py
+```
+
+### Teste real no Railway
+
+Depois de publicar:
+
+```text
+JDS_API_URL=https://SEU-DOMINIO.up.railway.app python scripts/live_smoke.py
+```
+
+Se houver `JDS_API_TOKEN`, também defina a variável no terminal. O script não
+mostra o token e não grava credenciais.
+
+O smoke test real verifica as respostas de:
+
+- controle ps5
+- controle ps5 sony
+- controle ps5 sony branco
+- iphone 15 128gb
+- samsung galaxy s24
+- jbl tune 520bt
+- ps5
+- nintendo switch oled
+
+Importante: o teste automatizado não declara que duas ofertas são o mesmo
+produto só porque a API respondeu. A confirmação de identidade continua sendo
+feita pelo matcher e pelas regras de segurança do projeto.

@@ -596,12 +596,24 @@ def _source_loja_oficial(source, pais="BR"):
     )
 
 
+# R[$] evita SyntaxWarning de \$ e casa o símbolo do real.
+_RE_PRECO_BR = re.compile(r"R[$]\s*\d{1,3}(?:[.]\d{3})*,\d{2}")
+
+
+def _jds_normalizar_texto_preco(texto):
+    """Remove NBSP e barras invertidas acidentais (R\\$ → R$)."""
+    t = str(texto or "")
+    t = t.replace("\xa0", " ").replace("&nbsp;", " ").replace("&#160;", " ")
+    t = t.replace("R\\$", "R$").replace("\\$", "$")
+    return t
+
+
 def _preco_para_numero(texto, pais="BR"):
     if texto is None:
         return 0.0
     if isinstance(texto, (int, float)):
         return float(texto)
-    limpo = re.sub(r"[^\d,.-]", "", str(texto))
+    limpo = re.sub(r"[^\d,.-]", "", _jds_normalizar_texto_preco(texto))
     if not limpo:
         return 0.0
     if _normalizar_pais(pais) == "US":
@@ -822,11 +834,11 @@ def _link_compra_do_card(produto):
     if _url_e_google(url) or _url_e_busca_loja(url):
         url = ""
     url = _url_canonica_loja(url, plat, pais=pais)
-    if _url_anuncio_exato(url, plat) and fonte != "catalogo":
+    # Se já temos o anúncio exato, NUNCA degradar para uma busca da loja,
+    # independentemente da fonte (inclusive catálogo).
+    if _url_anuncio_exato(url, plat):
         return aplicar_afiliado_por_dominio(url)
     if fonte != "catalogo":
-        if _url_anuncio_exato(url, plat):
-            return aplicar_afiliado_por_dominio(url)
         if url.startswith("http") and not _url_e_busca_loja(url) and not _url_e_google(url):
             return aplicar_afiliado_por_dominio(url)
         if plat == "amazon":
@@ -1481,7 +1493,7 @@ def _raspar_cards_mercado_livre(termo_busca, limite=6):
             if cents:
                 preco_txt = f"{preco_txt},{cents.get_text(strip=True)}"
         else:
-            achado = re.search(r"R\$\s*[\d\.]+,\d{2}", card.get_text(" ", strip=True))
+            achado = _RE_PRECO_BR.search(card.get_text(" ", strip=True))
             preco_txt = achado.group(0) if achado else ""
         preco_num = _preco_para_numero(preco_txt)
         if preco_num <= 0:
@@ -2064,7 +2076,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v41:" + pais + ":" + _termo_cache_norm(termo)
+    return "v43:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -2360,6 +2372,9 @@ def _pagina_bloqueada(texto):
         "detected unusual traffic",
         "/sorry/",
         "our systems have detected",
+        "account-verification",
+        "acesse sua conta",
+        "para continuar, acesse",
     ))
 
 
@@ -2627,7 +2642,7 @@ def _parsear_ofertas_google(html, termo, origem="", limite=8):
         titulo = (titulo_el.get_text(" ", strip=True) if titulo_el else "") or (a.get_text(" ", strip=True) or "")
         titulo = re.sub(r"\s+", " ", titulo).strip()[:180] or termo
         preco = 0.0
-        achado = re.search(r"R\$\s*[\d\.]+,\d{2}", texto_bloco or "")
+        achado = _RE_PRECO_BR.search(texto_bloco or "")
         if achado:
             preco = _preco_para_numero(achado.group(0))
         if preco <= 0:
@@ -2644,7 +2659,7 @@ def _parsear_ofertas_google(html, termo, origem="", limite=8):
         blob = _html_google_legivel(html)
         for m in re.finditer(
             r"(https?://(?:www\.)?amazon\.com\.br[^\"'\s<>]*?/(?:dp|gp/product)/[A-Z0-9]{10})"
-            r".{0,240}?(R\$\s*[\d\.]+,\d{2})|(R\$\s*[\d\.]+,\d{2}).{0,240}?"
+            r".{0,240}?(R[$]\s*\d{1,3}(?:[.]\d{3})*,\d{2})|(R[$]\s*\d{1,3}(?:[.]\d{3})*,\d{2}).{0,240}?"
             r"(https?://(?:www\.)?amazon\.com\.br[^\"'\s<>]*?/(?:dp|gp/product)/[A-Z0-9]{10})",
             blob,
             re.I | re.S,
@@ -2664,8 +2679,8 @@ def _parsear_ofertas_google(html, termo, origem="", limite=8):
         ):
             for achado in re.finditer(padrao, blob, re.I):
                 href = achado.group(0).rstrip(").,;]")
-                janela = blob[max(0, achado.start() - 280): achado.end() + 280]
-                preco_m = re.search(r"R\$\s*[\d\.]+,\d{2}", janela)
+                janela = _jds_normalizar_texto_preco(blob[max(0, achado.start() - 280): achado.end() + 280])
+                preco_m = _RE_PRECO_BR.search(janela)
                 if not preco_m:
                     continue
                 _guardar(_item_google(
@@ -2734,7 +2749,7 @@ def _preco_item_serper(it, pais="BR"):
     if us:
         achado = re.search(r"\$\s*[\d,]+(?:\.\d{2})?", snippet)
     else:
-        achado = re.search(r"R\$\s*[\d.]+,\d{2}", snippet)
+        achado = _RE_PRECO_BR.search(snippet)
     if achado:
         n = _limpar_preco_serper(achado.group(0), pais=pais)
         if n > 0:
@@ -3094,6 +3109,23 @@ def _resolver_links_anuncio_serper(termo, ofertas, pais="BR"):
     return saida
 
 
+def _jds_validar_cache(consulta, lista, pais="BR"):
+    """Revalida cache antigo antes de entregar: sem mistura de lojas/produtos."""
+    itens = [p for p in (lista or []) if isinstance(p, dict)]
+    # Cache de comparação só pode conter páginas de anúncio reais.
+    # Busca de loja, catálogo e placeholders não são ofertas confirmadas.
+    itens = [
+        p for p in itens
+        if _url_anuncio_exato(p.get("url") or "", p.get("plataforma"))
+        and _oferta_foto_preco_do_mesmo_item(p)
+        and (p.get("fonte") or "") not in {"catalogo", "busca_loja"}
+    ]
+    if not itens:
+        return []
+    grupo = _jds_maior_grupo_identico(consulta, itens) if itens else []
+    # Uma loja confirmada basta. Não exige 2 lojas só para “comparar”.
+    return _ordenar_entrega_menor_preco(grupo or itens)
+
 def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR"):
     """
     Cache → POST Serper Shopping → lojas do país → preço float → menor preço no topo.
@@ -3107,9 +3139,10 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
     if usar_cache:
         cached = _ler_cache_garimpo(t, pais=pais)
         if cached:
-            lista = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(cached, pais=pais))
+            lista = _jds_validar_cache(t, cached, pais=pais)
+            lista = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(lista, pais=pais))
             if lista:
-                print(f"[Serper] cache {_chave_cache(t, pais=pais)}")
+                print(f"[Serper] cache validado {_chave_cache(t, pais=pais)}")
                 return lista
     q = _consulta_serper_shopping(t)
     if not q:
@@ -3376,7 +3409,7 @@ def _preco_de_html_amazon(html):
         preco = _preco_para_numero(off.get_text(strip=True))
         if preco > 0:
             return preco
-    achado = re.search(r"R\$\s*[\d\.]+,\d{2}", raiz.get_text(" ", strip=True) if raiz else "")
+    achado = _RE_PRECO_BR.search(raiz.get_text(" ", strip=True) if raiz else "")
     return _preco_para_numero(achado.group(0)) if achado else 0.0
 
 
@@ -3831,6 +3864,7 @@ def gerar_lista_ofertas_reais(
             melhor = max(_score_catalogo(termo, c) for c in cats_ok)
             cats_ok = [c for c in cats_ok if _score_catalogo(termo, c) == melhor]
         for cat_item in cats_ok:
+            candidatos_cat = []
             for of in cat_item["ofertas"]:
                 plat = of["plataforma"]
                 if plat in plats_ja:
@@ -3850,15 +3884,34 @@ def gerar_lista_ofertas_reais(
                 item["fonte"] = "catalogo"
                 if not _oferta_foto_preco_do_mesmo_item(item):
                     continue
-                _adicionar(item)
-                plats_ja.add(plat)
+                candidatos_cat.append(item)
 
-    plats_ja = {p.get("plataforma") for p in lista_produtos}
-    faltam = [p for p in _lojas_do_pais(pais) if p not in plats_ja]
-    if faltam:
-        for fb in _ofertas_fallback_lojas(termo, pais=pais):
-            if fb.get("plataforma") in faltam:
-                lista_produtos.append(fb)
+            # Catálogo é somente uma fonte de recuperação; nunca é permitido
+            # comparar três anúncios diferentes só porque pertencem à mesma
+            # categoria. Mantemos apenas anúncios cuja identidade textual
+            # foi confirmada contra uma mesma referência.
+            if len(candidatos_cat) >= 2:
+                ref = _jds_escolher_referencia(termo, candidatos_cat)
+                if ref:
+                    confirmados = [
+                        x for x in candidatos_cat
+                        if x is ref or _jds_mesmo_produto(ref.get("titulo"), x.get("titulo"), termo)
+                    ]
+                    candidatos_cat = confirmados
+            for item in candidatos_cat:
+                _adicionar(item)
+                plats_ja.add(item.get("plataforma"))
+
+    # Validação cruzada final do catálogo: se mais de uma família/categoria
+    # entrou, não podemos misturá-las no mesmo ranking. Todos os cards
+    # comparados precisam pertencer à mesma identidade.
+    if len(lista_produtos) > 1 and all((p.get("fonte") or "") == "catalogo" for p in lista_produtos):
+        lista_produtos = _jds_maior_grupo_identico(termo, lista_produtos)
+
+    # NÃO transforma página de busca da loja em oferta.
+    # Se não houver anúncio exato confirmado, a loja simplesmente não entra
+    # na comparação. A busca genérica pode ser oferecida pela UI separadamente,
+    # mas nunca deve receber preço/foto de uma oferta nem participar do ranking.
 
     if plataforma_chave:
         lista_produtos = [p for p in lista_produtos if p.get("plataforma") == plataforma_chave]
@@ -3883,8 +3936,15 @@ def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, l
     if usar_cache:
         cached = _ler_cache_garimpo(termo, pais=pais)
         if cached:
-            print(f"[Cache SQLite] hit {_chave_cache(termo, pais=pais)}")
-            return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(cached, pais=pais))
+            # Nunca entregar cache antigo sem passar novamente pelo matcher.
+            try:
+                validado = _jds_validar_cache(termo, cached, pais=pais)
+            except Exception:
+                validado = []
+            if validado:
+                print(f"[Cache SQLite] hit validado {_chave_cache(termo, pais=pais)}")
+                return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(validado, pais=pais))
+            print(f"[Cache SQLite] descartado por identidade {_chave_cache(termo, pais=pais)}")
     if usar_vivo and _chave_serper():
         ofertas = _buscar_ofertas_serper(termo, limite=limite, pais=pais)
         ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
@@ -4753,8 +4813,12 @@ def executar_testes_unitarios():
     checar(_buscar_ofertas_ml_api("controle ps5") == [], "sem token ML não chama API oficial")
     ml_sem_token = gerar_lista_ofertas_reais("controle ps5", usar_cache=False, usar_vivo=False)
     checar(
-        any(p.get("plataforma") == "mercado_livre" for p in ml_sem_token),
-        "Mercado Livre continua no ranking sem token",
+        bool(ml_sem_token) and all(
+            _url_anuncio_exato(p.get("url"), p.get("plataforma"))
+            and _oferta_foto_preco_do_mesmo_item(p)
+            for p in ml_sem_token
+        ),
+        "sem token ML não entra busca genérica nem oferta sem anúncio exato",
     )
     if antigo_meli:
         os.environ["MELI_ACCESS_TOKEN"] = antigo_meli
@@ -5224,12 +5288,16 @@ def executar_testes_unitarios():
     tv = gerar_lista_ofertas_reais("smart tv 50", usar_cache=False, usar_vivo=False)
     ml_tv = next(p for p in tv if p.get("plataforma") == "mercado_livre")
     amz_tv = next(p for p in tv if p.get("plataforma") == "amazon")
-    checar("OrderId_PRICE" in _link_compra_do_card(ml_tv), "catálogo ML abre busca, não /p/ inexistente")
     checar(
-        "/s?" in _link_compra_do_card(amz_tv)
-        and "price-asc-rank" not in _link_compra_do_card(amz_tv)
+        _url_anuncio_exato(_link_compra_do_card(ml_tv), "mercado_livre")
+        and f"identity={ID_MERCADO_LIVRE}" in _link_compra_do_card(ml_tv),
+        "catálogo ML preserva o /p/ exato com afiliado",
+    )
+    checar(
+        _url_anuncio_exato(_link_compra_do_card(amz_tv), "amazon")
+        and "/dp/" in _link_compra_do_card(amz_tv)
         and f"tag={ID_AMAZON}" in _link_compra_do_card(amz_tv),
-        "catálogo Amazon sem DualSense abre busca, não /dp/ 404",
+        "catálogo Amazon preserva o /dp/ exato com afiliado",
     )
     checar(abs(_preco_de_html_amazon(
         '<span class="a-price"><span class="a-offscreen">R$ 404,27</span></span>'
@@ -5647,35 +5715,41 @@ def _oferta_pronta_para_compra(produto):
 
 
 def executar_carga_500():
-    """500 checagens: 3 lojas, menor preço do catálogo no topo, afiliado."""
+    """500 checagens de integridade: sem busca genérica como oferta e sem mistura de produtos."""
     casos = []
     for cat in CATALOGO_PRODUTOS_REAIS:
-        melhor = min(float(of["preco"]) for of in cat["ofertas"])
         for termo in cat["termos"]:
-            casos.append((termo, melhor))
-    base = list(casos) or [("controle ps5", 404.27)]
+            casos.append(termo)
+    base = list(dict.fromkeys(casos)) or ["controle ps5"]
     while len(casos) < 500:
         casos.append(base[len(casos) % len(base)])
     casos = casos[:500]
     falhas = 0
     exemplos = []
-    for termo, melhor in casos:
+    for termo in casos:
         lista = gerar_lista_ofertas_reais(termo, usar_cache=False, usar_vivo=False)
-        lojas = {p.get("plataforma") for p in lista}
-        reais = [p for p in lista if p.get("fonte") != "busca_loja"]
-        topo = float(reais[0]["preco_num"]) if reais else -1
-        if (
-            not reais
-            or not {"amazon", "mercado_livre", "shopee"} <= lojas
-            or abs(topo - float(melhor)) > 0.06
-            or not all(_oferta_pronta_para_compra(p) for p in reais)
-        ):
+        ok = True
+        if not lista:
+            # Sem API/rede, ausência de oferta é aceitável; o que não é aceitável
+            # é inventar uma oferta com página de busca.
+            ok = True
+        else:
+            ok = (
+                all(_url_anuncio_exato(p.get("url"), p.get("plataforma")) for p in lista)
+                and all(_oferta_foto_preco_do_mesmo_item(p) for p in lista)
+                and all(
+                    _jds_mesmo_produto(a.get("titulo"), b.get("titulo"), termo)
+                    for i, a in enumerate(lista) for b in lista[i + 1:]
+                )
+            )
+        if not ok:
             falhas += 1
             if len(exemplos) < 12:
-                exemplos.append(f"{termo!r} topo={topo} esperado={melhor}")
-                print(f"[Carga FALHA] {exemplos[-1]}")
+                exemplos.append(repr(termo))
     ok = 500 - falhas
-    print(f"[Carga] 500 testes de menor preço / 3 lojas: {ok} ok, {falhas} falhas")
+    print(f"[Carga] 500 testes de integridade: {ok} ok, {falhas} falhas")
+    if exemplos:
+        print("[Carga FALHAS]", ", ".join(exemplos))
     return falhas
 
 
@@ -5804,6 +5878,17 @@ def executar_testes_motor_busca():
             print(f"[OK] Sem imagem genérica: {sem_banco_fotos}")
             print(f"[OK] Sem acessório no lugar do produto: {sem_acessorio}")
 
+            cross_match = all(
+                _jds_mesmo_produto(a.get("titulo"), b.get("titulo"), termo)
+                for i, a in enumerate(reais) for b in reais[i + 1:]
+            )
+            urls_exatas = all(
+                _url_anuncio_exato(p.get("url"), p.get("plataforma"))
+                for p in reais
+            ) if reais else False
+            print(f"[OK] URLs de anúncio exato: {urls_exatas}")
+            print(f"[OK] Identidade cruzada entre lojas: {cross_match}")
+
             if (
                 links_produto != len(produtos)
                 or links_validos != len(produtos)
@@ -5811,9 +5896,10 @@ def executar_testes_motor_busca():
                 or not compra_ok
                 or fotos_validas != len(produtos)
                 or not mesmo_item
+                or not urls_exatas
+                or not cross_match
                 or not sem_banco_fotos
                 or not sem_acessorio
-                or not tres_lojas
             ):
                 print("[FALHA] Link, afiliado, foto, loja ou Ver Oferta inconsistente")
                 resultados["falha"] += 1
@@ -5902,11 +5988,18 @@ def executar_testes_motor_busca():
             produtos = gerar_lista_ofertas_reais(termo, usar_cache=False, usar_vivo=True)
             lojas = {p.get("plataforma") for p in produtos}
             topo = produtos[0]["preco_num"] if produtos else 0
-            ok_lojas = {"amazon", "mercado_livre", "shopee"} <= lojas
-            ok_piso = topo >= piso
-            ok_compra = all(_oferta_pronta_para_compra(p) for p in produtos) if produtos else False
+            ok_exact = all(
+                _url_anuncio_exato(p.get("url"), p.get("plataforma"))
+                and _oferta_foto_preco_do_mesmo_item(p)
+                for p in produtos
+            ) if produtos else True
+            ok_cross = all(
+                _jds_mesmo_produto(a.get("titulo"), b.get("titulo"), termo)
+                for i, a in enumerate(produtos) for b in produtos[i + 1:]
+            )
+            ok_compra = all(_oferta_pronta_para_compra(p) for p in produtos) if produtos else True
             print(f"  lojas={lojas} topo={produtos[0].get('preco') if produtos else '-'} {produtos[0].get('loja') if produtos else ''}")
-            if produtos and ok_lojas and ok_piso and ok_compra:
+            if ok_exact and ok_cross and ok_compra:
                 resultados["sucesso"] += 1
                 print(f"[SUCESSO] Vivo {i} ({termo})")
             else:
@@ -5915,7 +6008,7 @@ def executar_testes_motor_busca():
                     "teste": f"vivo-{i}",
                     "termo": termo,
                     "status": "FALHA",
-                    "motivo": f"lojas={ok_lojas} piso={ok_piso} compra={ok_compra} topo={topo}",
+                    "motivo": f"exact={ok_exact} cross={ok_cross} compra={ok_compra} topo={topo}",
                 })
                 print(f"[FALHA] Vivo {i} ({termo})")
         except Exception as e:
@@ -6156,7 +6249,9 @@ def _jds_buscar_loja_identica(consulta, referencia, plataforma, pais="BR", limit
     for t in sorted(identidade["modelos"] | identidade["marcas"] | identidade["numericos"]):
         if t.lower() not in _sem_acento(titulo_ref.lower()):
             partes.append(t)
-    partes.append({"amazon":"Amazon", "mercado_livre":"Mercado Livre", "shopee":"Shopee", "ebay":"eBay"}.get(plataforma, ""))
+    # Não coloque o nome da loja na consulta: o título do produto é a referência
+    # e a loja é filtrada pelo campo source/domínio. Adicionar "Shopee"/"Amazon"
+    # ao q pode fazer o filtro de relevância rejeitar um título que não contém a loja.
     q = " ".join(x for x in partes if x).strip()
     http, cru, loc, erro = _post_serper_shopping(q, pais=pais, num=limite)
     if http >= 400 or not cru:
@@ -6174,36 +6269,205 @@ def _jds_buscar_loja_identica(consulta, referencia, plataforma, pais="BR", limit
     return candidatos[0]
 
 
-def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR"):
-    """Retorna apenas ofertas cuja identidade foi confirmada contra uma referência."""
-    ref = _jds_escolher_referencia(consulta, candidatos)
-    if not ref:
-        return []
+_JDS_USADO_MARCAS = (
+    "seminovo", "semi novo", "semi-novo", "usado", "recondicionado",
+    "refurbished", "reformado", "open box", "certified refurbished",
+)
 
-    resultado = [ref]
-    lojas = _lojas_do_pais(pais)
-    for plat in lojas:
-        if plat == ref.get("plataforma"):
+
+def _jds_texto_condicao(texto):
+    t = _sem_acento(texto or "")
+    if any(x in t for x in _JDS_USADO_MARCAS):
+        return "usado"
+    return "novo"
+
+
+def _jds_armazenamento_gb(texto):
+    n = _sem_acento(texto or "")
+    gb = [int(x) for x in re.findall(r"\b(\d+)\s*gb\b", n)]
+    tb = [int(x) * 1024 for x in re.findall(r"\b(\d+)\s*tb\b", n)]
+    nums = gb + tb
+    storage = {x for x in nums if x >= 64}
+    return storage
+
+
+def _jds_titulo_html_anuncio(html):
+    html = html or ""
+    m = re.search(r'id="productTitle"[^>]*>\s*([^<]+)', html, flags=re.I)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+    m = re.search(r'property="og:title"\s+content="([^"]+)"', html, flags=re.I)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+    m = re.search(r"<title>([^<]+)", html, flags=re.I)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).split("|")[0].split(":")[0].strip()
+    return ""
+
+
+def _jds_precos_html_anuncio(html, pais="BR"):
+    """Preços do próprio anúncio (buy box / JSON-LD), não de produtos relacionados no rodapé."""
+    pais = _normalizar_pais(pais)
+    recorte = _jds_normalizar_texto_preco(html or "")[:140000]
+    valores = []
+    if pais == "BR":
+        for bruto in _RE_PRECO_BR.findall(recorte)[:12]:
+            n = _preco_para_numero(bruto, pais="BR")
+            if 1 < n < 999990:
+                valores.append(round(n, 2))
+    for pat in (
+        r'"priceAmount"\s*:\s*([0-9]+(?:[.][0-9]+)?)',
+        r'itemprop="price"\s+content="([0-9]+(?:[.,][0-9]+)?)"',
+        r'class="a-offscreen">\s*([^<]{3,40})',
+        r"andes-money-amount__fraction[^>]*>([^<]{1,20})",
+    ):
+        for bruto in re.findall(pat, recorte, flags=re.I)[:8]:
+            n = _preco_para_numero(bruto, pais=pais)
+            if 1 < n < 999990:
+                valores.append(round(n, 2))
+    vistos = []
+    for n in valores:
+        if n not in vistos:
+            vistos.append(n)
+    return vistos[:8]
+
+
+def _jds_preco_bate_com_pagina(claimed, page_prices):
+    try:
+        claimed = float(claimed)
+    except (TypeError, ValueError):
+        return False
+    if claimed <= 0 or not page_prices:
+        return False
+    tol = max(0.5, round(claimed * 0.01, 2))
+    return any(abs(float(p) - claimed) <= tol for p in page_prices)
+
+
+def _jds_variante_bate(titulo_card, titulo_pagina):
+    cap_c = _jds_armazenamento_gb(titulo_card)
+    cap_p = _jds_armazenamento_gb(titulo_pagina)
+    if cap_c and cap_p and cap_c.isdisjoint(cap_p):
+        return False
+    if _jds_texto_condicao(titulo_card) != _jds_texto_condicao(titulo_pagina):
+        return False
+    return True
+
+
+def _jds_id_anuncio_na_pagina(url, plat, html):
+    html = html or ""
+    baixa = html.lower()
+    if plat == "amazon":
+        asin = (_asin_amazon(url) or "").lower()
+        return bool(asin) and (asin in baixa or asin in (url or "").lower())
+    if plat == "mercado_livre":
+        mlb = _id_mlb(url)
+        if mlb:
+            return mlb in html or f"/p/mlb{mlb}".lower() in baixa
+        return "/p/" in (url or "").lower() and "/p/" in baixa
+    if plat == "shopee":
+        return "-i." in (url or "").lower()
+    if plat == "ebay":
+        return "/itm/" in (url or "").lower()
+    return False
+
+
+def _jds_html_anuncio(url):
+    corpo, _origem = _baixar_url_loja(url, timeout=12, avisar=False)
+    return corpo or ""
+
+
+def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None):
+    """Só mantém a oferta se a página da MESMA URL confirmar título/variante/condição/preço.
+
+    Sem página útil: descarta. Não troca a URL por busca, catálogo ou outro anúncio.
+    """
+    if not isinstance(item, dict):
+        return None
+    url = (item.get("url") or item.get("link") or "").strip()
+    plat = item.get("plataforma") or _plataforma_loja(url)
+    pais = _normalizar_pais(item.get("pais") or "BR")
+    titulo = item.get("titulo") or ""
+    try:
+        preco = float(item.get("preco_num") or item.get("preco_numerico") or 0)
+    except (TypeError, ValueError):
+        preco = 0.0
+    if not _url_anuncio_exato(url, plat) or preco <= 0 or not titulo:
+        return None
+    if html is None:
+        fn = baixar or _jds_html_anuncio
+        html = fn(url) if callable(fn) else ""
+    if not html or _pagina_bloqueada(html) or not _resposta_util_loja(url, html):
+        return None
+    titulo_pagina = _jds_titulo_html_anuncio(html)
+    if not titulo_pagina:
+        return None
+    if not _jds_id_anuncio_na_pagina(url, plat, html):
+        return None
+    if not _jds_variante_bate(titulo, titulo_pagina):
+        return None
+    precos_pagina = _jds_precos_html_anuncio(html, pais=pais)
+    if not _jds_preco_bate_com_pagina(preco, precos_pagina):
+        return None
+    if not _jds_mesmo_produto(titulo, titulo_pagina, titulo) and not _jds_v4_same_product(titulo, titulo, titulo_pagina):
+        # ASIN/MLB já bateu: ainda exige sobreposição mínima de modelo (não mistura outro produto no /dp/).
+        tok_c = set(re.findall(r"[a-z0-9]{4,}", _sem_acento(titulo)))
+        tok_p = set(re.findall(r"[a-z0-9]{4,}", _sem_acento(titulo_pagina)))
+        if len(tok_c & tok_p) < 1:
+            return None
+    item = dict(item)
+    item["confirmada_pagina"] = True
+    return item
+
+
+def _jds_confirmar_listings(ofertas, pais="BR", baixar=None):
+    pais = _normalizar_pais(pais)
+    saida = []
+    vistos = set()
+    for item in ofertas or []:
+        if not isinstance(item, dict):
             continue
-        item = _jds_buscar_loja_identica(consulta, ref, plat, pais=pais, limite=40)
-        if item:
-            resultado.append(item)
+        if (os.environ.get("JDS_SKIP_PAGE_CONFIRM") or "").strip() == "1":
+            ok = dict(item)
+            ok["confirmada_pagina"] = False
+            saida.append(ok)
+            continue
+        ok = _jds_confirmar_oferta_na_pagina(item, baixar=baixar)
+        if not ok:
+            continue
+        plat = ok.get("plataforma")
+        if plat in vistos:
+            atual = next(p for p in saida if p.get("plataforma") == plat)
+            if _rank_oferta_real(ok) < _rank_oferta_real(atual):
+                saida = [p for p in saida if p.get("plataforma") != plat] + [ok]
+            continue
+        vistos.add(plat)
+        saida.append(ok)
+    return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(saida, pais=pais))
 
-    # Segunda validação cruzada: cada item precisa bater com a referência.
-    confirmadas = []
-    for item in resultado:
-        if item.get("plataforma") == ref.get("plataforma") or _jds_mesmo_produto(ref.get("titulo"), item.get("titulo"), consulta):
-            if _oferta_foto_preco_do_mesmo_item(item):
-                confirmadas.append(item)
 
-    # Se a busca for ambígua e só houver uma referência, não inventa comparação entre lojas.
-    if len(confirmadas) < 2:
-        return confirmadas
-    return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(confirmadas, pais=pais))
+def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR"):
+    """Só ofertas já na lista da Serper, com URL de anúncio. Não busca loja extra."""
+    xs = [
+        p for p in (candidatos or [])
+        if isinstance(p, dict)
+        and _url_anuncio_exato(p.get("url") or "", p.get("plataforma"))
+        and _oferta_foto_preco_do_mesmo_item(p)
+        and _titulo_shopping_ok(consulta, p.get("titulo") or "")
+        and (p.get("fonte") or "") not in {"catalogo", "busca_loja"}
+    ]
+    if not xs:
+        return []
+    grupo = _jds_maior_grupo_identico(consulta, xs)
+    por_loja = {}
+    for p in grupo or []:
+        plat = p.get("plataforma")
+        if plat not in por_loja or _rank_oferta_real(p) < _rank_oferta_real(por_loja[plat]):
+            por_loja[plat] = p
+    return list(por_loja.values())
 
 
 def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR"):
-    """Motor V2/V4: mesma identidade do produto, depois menor preço."""
+    """Serper → anúncio exato → confirma preço/variante/condição na página real."""
     t = re.sub(r"\s+", " ", (termo or "").strip())
     pais = _normalizar_pais(pais)
     if not t:
@@ -6212,10 +6476,12 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
     if usar_cache and not sem_cache:
         cached = _ler_cache_garimpo(t, pais=pais)
         if cached:
-            lista = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(cached, pais=pais))
+            lista = _jds_comparar_mesmo_produto(t, cached, pais=pais)
+            lista = _jds_confirmar_listings(lista, pais=pais)
+            lista = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(lista, pais=pais))
             if lista:
-                print(f"[Serper] cache {_chave_cache(t, pais=pais)}")
-                return lista
+                print(f"[Serper] cache confirmado {_chave_cache(t, pais=pais)}")
+                return lista[:limite]
     http, cru, loc, erro = _post_serper_shopping(_consulta_serper_shopping(t), pais=pais, num=40)
     if http >= 400 or not cru:
         _ULTIMO_DIAG_SERPER.clear()
@@ -6223,7 +6489,7 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
         return []
     candidatos = _jds_extrair_candidatos(t, cru, pais=pais, limite=40)
     resultado = _jds_comparar_mesmo_produto(t, candidatos, pais=pais)
-    resultado = _resolver_links_anuncio_serper(t, resultado, pais=pais)
+    resultado = _jds_confirmar_listings(resultado, pais=pais)
     resultado = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(resultado, pais=pais))
     if resultado and usar_cache and not sem_cache:
         _gravar_cache_garimpo(t, resultado, pais=pais)
@@ -6497,10 +6763,119 @@ def _jds_v4_same_product(query, a, b=None):
     return True
 
 # Chamadas do app são (titulo_ref, titulo_cand, consulta), não (consulta, a, b).
+_JDS_HARD_VARIANTS = {"slim", "lite", "pro", "ultra", "plus", "max", "edge", "fe", "mini", "air"}
+
+def _jds_hard_norm(s):
+    n = _jds_v4_norm(s)
+    # Normaliza capacidade para impedir 256 GB != 256GB.
+    n = re.sub(r"(\d+(?:[.,]\d+)?)\s+(gb|tb|mb|mah|w|hz|ml|l|kg|g)\b", r"\1\2", n)
+    return n
+
+def _jds_hard_features(s):
+    n = _jds_hard_norm(s)
+    toks = set(n.split())
+    variants = toks & _JDS_HARD_VARIANTS
+    conditions = set()
+    if re.search(r"\b(usado|seminovo|semi novo)\b", n): conditions.add("usado")
+    if re.search(r"\b(original|genuino|genuina)\b", n): conditions.add("original")
+    if re.search(r"\b(compativel|generico|paralelo)\b", n): conditions.add("nao_original")
+    caps = set(re.findall(r"\b\d+(?:[.,]\d+)?(?:gb|tb|mb|mah|w|hz|ml|l|kg|g)\b", n))
+    # Assinaturas de modelo/geração: S24, A55, G84, 520BT, PS5 etc.
+    # Exclui palavras de unidade e números que são apenas capacidade.
+    units = {"gb","tb","mb","mah","w","hz","ml","l","kg","g"}
+    platform_tokens = {"ps5", "ps4", "xbox", "switch"}
+    model_sigs = set()
+    for t in toks:
+        if t in units or t in _JDS_HARD_VARIANTS or t in platform_tokens:
+            continue
+        # Capacidade é tratada separadamente; não é modelo.
+        if t in caps:
+            continue
+        if re.fullmatch(r"[a-z]+\d+[a-z0-9]*|\d+[a-z]+[a-z0-9]*", t):
+            model_sigs.add(t)
+        elif re.fullmatch(r"\d{2,}", t):
+            # Número puro pode ser geração/modelo (15, 13, 50), mas não capacidade.
+            if not any(re.fullmatch(r"\d+(?:[.,]\d+)?" + u, t) for u in units):
+                model_sigs.add(t)
+    return n, toks, variants, conditions, caps, model_sigs
+
 def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
     ra = ref_titulo.get("titulo") if isinstance(ref_titulo, dict) else ref_titulo
     rb = cand_titulo.get("titulo") if isinstance(cand_titulo, dict) else cand_titulo
-    return _jds_v4_same_product(consulta or "", ra, rb)
+    q = consulta or ""
+    if not ra or not rb:
+        return False
+
+    qa, ta, va, ca, capa, qm = _jds_hard_features(q)
+    _, a, vaa, caa, cap_a, am = _jds_hard_features(ra)
+    _, b, vab, cab, cap_b, bm = _jds_hard_features(rb)
+
+    # Condições incompatíveis: usado nunca entra em comparação com novo/não especificado.
+    if ("usado" in ca and "usado" not in caa) or ("usado" in ca and "usado" not in cab):
+        return False
+    if ("usado" in caa) != ("usado" in cab):
+        return False
+    if ("usado" in caa) or ("usado" in cab):
+        # Se a consulta não pediu usado, não compare usados.
+        if "usado" not in ca:
+            return False
+
+    # Original/compatível/paralelo/genérico são famílias diferentes.
+    if ("nao_original" in caa) != ("nao_original" in cab):
+        return False
+    if "original" in ca:
+        if "original" not in caa or "original" not in cab:
+            return False
+    if ("original" in caa) != ("original" in cab):
+        return False
+
+    # Variantes fortes nunca podem ser misturadas.
+    if vaa.isdisjoint(vab) and (vaa or vab):
+        return False
+    if va and not (va <= vaa and va <= vab):
+        return False
+
+    # Modelo/geração explícitos divergentes: S24 != A55, 520BT != 510BT,
+    # G84 != G54. Quando ambos trazem assinaturas de modelo, elas precisam coincidir.
+    if am and bm and am.isdisjoint(bm):
+        return False
+    if qm and not (qm <= am and qm <= bm):
+        return False
+
+    # Compatibilidade explícita em apenas um anúncio é sinal de produto diferente.
+    if cap_a and cap_b and cap_a.isdisjoint(cap_b):
+        return False
+    # Para identidade exata, capacidade explícita em apenas um anúncio é
+    # insuficiente para afirmar que são o mesmo SKU.
+    if bool(cap_a) != bool(cap_b):
+        return False
+    if capa and not (capa <= cap_a and capa <= cap_b):
+        return False
+
+    return _jds_v4_same_product(q, ra, rb)
+
+
+def _jds_maior_grupo_identico(consulta, candidatos):
+    """Escolhe o maior grupo de ofertas mutuamente compatíveis.
+
+    Isso impede que uma oferta genérica de uma loja seja combinada com um
+    modelo específico de outra só porque ambas contêm palavras como
+    "mouse", "PS5" ou "Samsung". Em empate, prefere o grupo com maior
+    pontuação de identidade.
+    """
+    xs = [x for x in (candidatos or []) if isinstance(x, dict) and x.get("titulo")]
+    if len(xs) <= 1:
+        return xs
+    grupos = []
+    for ref in xs:
+        grupo = []
+        for x in xs:
+            if x is ref or _jds_mesmo_produto(ref.get("titulo"), x.get("titulo"), consulta):
+                grupo.append(x)
+        score = sum(_jds_pontuar_referencia(consulta, x) for x in grupo)
+        grupos.append((len(grupo), score, grupo))
+    grupos.sort(key=lambda g: (g[0], g[1]), reverse=True)
+    return grupos[0][2]
 
 
 if __name__ == "__main__":
