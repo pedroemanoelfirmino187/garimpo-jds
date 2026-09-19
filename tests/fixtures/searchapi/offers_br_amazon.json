@@ -1,0 +1,23 @@
+{
+  "search_metadata": {"status": "Success"},
+  "offers": [
+    {
+      "position": 1,
+      "title": "Controle sem fio DualSense Sony PS5 Branco",
+      "price": "R$ 404,27",
+      "extracted_price": 404.27,
+      "total_price": "R$ 404,27",
+      "extracted_total_price": 404.27,
+      "link": "https://www.amazon.com.br/DualSense-Sony/dp/B0CQKLS4RP",
+      "merchant": {"name": "Amazon.com.br"}
+    },
+    {
+      "position": 2,
+      "title": "Outro produto misturado",
+      "price": "R$ 10,00",
+      "extracted_price": 10,
+      "link": "https://www.google.com/search?q=controle+ps5",
+      "merchant": {"name": "Google"}
+    }
+  ]
+}

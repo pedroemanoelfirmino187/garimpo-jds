@@ -1,0 +1,12 @@
+{
+  "offers": [
+    {
+      "position": 1,
+      "title": "Sony DualSense Wireless Controller for PS5",
+      "price": "$74.99",
+      "extracted_price": 74.99,
+      "link": "https://www.amazon.com/DualSense-Wireless-Controller/dp/B08H99BPJN",
+      "merchant": {"name": "Amazon.com"}
+    }
+  ]
+}

@@ -159,6 +159,7 @@ def test_api_health():
     data = response.json()
     assert data["ok"] is True
     assert "serper" in data["chaves"]
+    assert "searchapi" in data["chaves"]
     assert "cache_sqlite" in data["chaves"]
 
 

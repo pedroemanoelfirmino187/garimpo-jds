@@ -1,0 +1,13 @@
+{
+  "search_metadata": {"status": "Success"},
+  "offers": [
+    {
+      "position": 1,
+      "title": "Controle DualSense Sony PlayStation 5",
+      "price": "R$ 419,00",
+      "extracted_price": 419.0,
+      "link": "https://produto.mercadolivre.com.br/MLB-1234567890",
+      "merchant": {"name": "Mercado Livre"}
+    }
+  ]
+}

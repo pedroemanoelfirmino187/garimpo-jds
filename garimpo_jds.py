@@ -294,7 +294,7 @@ def _consulta_serper_shopping(termo):
 
 def _lojas_do_pais(pais="BR"):
     if _normalizar_pais(pais) == "US":
-        return ("amazon", "ebay")
+        return ("amazon", "walmart", "ebay", "target", "bestbuy")
     return ("amazon", "mercado_livre", "shopee")
 
 
@@ -384,11 +384,14 @@ def serializar_oferta_app(item, pais="BR"):
     if imagem.startswith("//"):
         imagem = "https:" + imagem
     loja = (p.get("loja") or _nome_loja(p.get("plataforma")) or "").strip()
+    original = (p.get("original_url") or "").strip()
     return {
         "titulo": titulo,
         "preco_formatado": texto,
         "preco_numerico": numero,
         "loja": loja,
+        "original_url": original or href,
+        "affiliate_url": href,
         "link_afiliado": href,
         "imagem": imagem,
         "price": texto,
@@ -587,7 +590,7 @@ def _preco_serper_para_float(texto, pais="BR"):
 def _source_loja_oficial(source, pais="BR"):
     s = (source or "").lower()
     if _normalizar_pais(pais) == "US":
-        return "amazon" in s or "ebay" in s
+        return any(x in s for x in ("amazon", "ebay", "walmart", "target", "best buy", "bestbuy"))
     return (
         "mercado livre" in s
         or "mercadolivre" in s
@@ -662,6 +665,9 @@ NOMES_LOJA = {
     "amazon": "Amazon",
     "shopee": "Shopee",
     "ebay": "eBay",
+    "walmart": "Walmart",
+    "target": "Target",
+    "bestbuy": "Best Buy",
 }
 
 
@@ -715,7 +721,7 @@ def _link_busca_ebay(termo):
 
 def _anuncio_veio_do_google(produto):
     fonte = ((produto or {}).get("fonte") or "").lower()
-    return fonte in {"google", "scrape", "oficial"}
+    return fonte in {"google", "scrape", "oficial", "searchapi"}
 
 
 def _url_canonica_loja(url, plat, pais="BR"):
@@ -793,6 +799,14 @@ def _url_anuncio_exato(url, plat):
         return "-i." in u or "/product/" in u
     if plat == "ebay":
         return "/itm/" in u
+    if plat == "walmart":
+        return "/ip/" in u and bool(re.search(r"/ip/.+/\d+", u))
+    if plat == "target":
+        return "/p/" in u and bool(re.search(r"/A-\d+", u, flags=re.I) or re.search(r"/-\s*/A-\d+", u, flags=re.I))
+    if plat == "bestbuy":
+        return "bestbuy.com" in u and (
+            "skuid=" in u or bool(re.search(r"/\d+\.p\b", u))
+        )
     return False
 
 
@@ -1521,7 +1535,7 @@ def _aplicar_afiliado_google(link_loja, plataforma=None, pais="BR"):
         return url_limpa
     pais = _normalizar_pais(pais)
     plat = plataforma or _plataforma_loja(url_limpa)
-    if plat not in {"amazon", "shopee", "mercado_livre", "ebay"}:
+    if plat not in {"amazon", "shopee", "mercado_livre", "ebay", "walmart", "target", "bestbuy"}:
         plat = _detectar_plataforma(url_limpa)
     if plat == "amazon" and _host_amazon_eua(url_limpa):
         return aplicar_tag_amazon_eua(url_limpa)
@@ -1539,7 +1553,7 @@ def _aplicar_afiliado_google(link_loja, plataforma=None, pais="BR"):
             if "shopee.com.br/search" in url_limpa.lower():
                 qs["sortBy"] = ["sales"]
                 qs.pop("order", None)
-        elif plat == "ebay":
+        elif plat in {"ebay", "walmart", "target", "bestbuy"}:
             return url_limpa
         else:
             return url_limpa
@@ -2050,7 +2064,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
             continue
         p["preco_num"] = n
         if p.get("fonte") != "busca_loja":
-            p["preco"] = _formatar_preco(n)
+            p["preco"] = _formatar_preco(n, pais=p.get("pais") or "BR")
         validos.append(p)
 
     melhor_por_loja = {}
@@ -2473,6 +2487,12 @@ def _loja_do_texto(texto):
         return "shopee"
     if "ebay" in t:
         return "ebay"
+    if "walmart" in t:
+        return "walmart"
+    if "target" in t:
+        return "target"
+    if "best buy" in t or "bestbuy" in t:
+        return "bestbuy"
     if "mercado livre" in t or "mercadolivre" in t or "mercado libre" in t:
         return "mercado_livre"
     return ""
@@ -2542,6 +2562,12 @@ def _plataforma_loja(url):
         return "mercado_livre"
     if "ebay." in baixa:
         return "ebay"
+    if "walmart." in baixa:
+        return "walmart"
+    if "target." in baixa:
+        return "target"
+    if "bestbuy." in baixa:
+        return "bestbuy"
     return ""
 
 
@@ -2577,7 +2603,7 @@ def _item_google(termo, titulo, preco, href, foto, plat, origem="", pais="BR"):
     href = _url_canonica_loja(href, plat, pais=pais)
     if _parece_artigo_nao_produto(titulo) or _parece_url_conteudo(href):
         return None
-    if origem == "serper":
+    if origem in {"serper", "searchapi"}:
         if not _titulo_shopping_ok(termo, titulo) or not _preco_plausivel(termo, preco, titulo, pais=pais):
             return None
     elif not _titulo_relevante(termo, titulo) or not _preco_plausivel(termo, preco, titulo, pais=pais):
@@ -2585,7 +2611,7 @@ def _item_google(termo, titulo, preco, href, foto, plat, origem="", pais="BR"):
     if _url_e_busca_loja(href):
         return None
     if not _url_anuncio_exato(href, plat):
-        if origem != "serper" or not str(href or "").startswith("http"):
+        if origem not in {"serper", "searchapi"} or not str(href or "").startswith("http"):
             return None
     foto = (foto or "").strip()
     if foto.startswith("//"):
@@ -6788,6 +6814,15 @@ def _jds_id_anuncio_na_pagina(url, plat, html):
         return "-i." in (url or "").lower()
     if plat == "ebay":
         return "/itm/" in (url or "").lower()
+    if plat == "walmart":
+        m = re.search(r"/ip/[^/?#]+/(\d+)", url or "", flags=re.I)
+        return bool(m) and m.group(1) in (html or "")
+    if plat == "target":
+        m = re.search(r"/A-(\d+)", url or "", flags=re.I)
+        return bool(m) and m.group(1) in (html or "")
+    if plat == "bestbuy":
+        m = re.search(r"skuId=(\d+)", url or "", flags=re.I) or re.search(r"/(\d+)\.p", url or "", flags=re.I)
+        return bool(m) and m.group(1) in (html or "")
     return False
 
 
@@ -6916,9 +6951,60 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
     return resultado[:limite]
 
 
+def buscar_ofertas_jds_shopping(termo, usar_cache=True, limite=20, pais="BR"):
+    """SearchApi primeiro; Serper só se não houver ofertas confirmadas."""
+    from jds_searchapi import buscar_ofertas_searchapi, ultimo_diag_searchapi
+
+    t = re.sub(r"\s+", " ", (termo or "").strip())
+    pais = _normalizar_pais(pais)
+    if not t:
+        return []
+    sem_cache = (os.environ.get("JDS_BUSCA_SEM_CACHE") or "").strip() == "1"
+    if usar_cache and not sem_cache:
+        cached = _ler_cache_garimpo(t, pais=pais)
+        if cached:
+            lista = _jds_comparar_mesmo_produto(t, cached, pais=pais)
+            lista = _jds_confirmar_listings(lista, pais=pais)
+            lista = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(lista, pais=pais))
+            if lista:
+                print(f"[Motor] cache confirmado {_chave_cache(t, pais=pais)}")
+                return lista[:limite]
+    ofertas, status = buscar_ofertas_searchapi(
+        t, pais=pais, limite=limite, usar_cache=usar_cache and not sem_cache,
+    )
+    sap = ultimo_diag_searchapi()
+    if ofertas:
+        _ULTIMO_DIAG_SERPER.clear()
+        _ULTIMO_DIAG_SERPER.update({
+            "q": t,
+            "fonte": "searchapi",
+            "searchapi": sap,
+            "SEARCHAPI_SUCCESS": True,
+            "fallback": False,
+            "ofertas": len(ofertas),
+        })
+        if usar_cache and not sem_cache:
+            _gravar_cache_garimpo(t, ofertas, pais=pais)
+        return ofertas[:limite]
+    fallback = buscar_ofertas_serper_shopping(
+        t, usar_cache=False, limite=limite, pais=pais,
+    )
+    _ULTIMO_DIAG_SERPER.update({
+        "fonte": "serper_fallback",
+        "searchapi": sap,
+        status: True,
+        "FALLBACK_SERPER": True,
+        "fallback": True,
+    })
+    print("[SearchApi] fallback=true")
+    if fallback and usar_cache and not sem_cache:
+        _gravar_cache_garimpo(t, fallback, pais=pais)
+    return fallback[:limite]
+
+
 def _buscar_ofertas_serper(termo, limite=8, pais="BR"):
     pais = _normalizar_pais(pais)
-    ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=max(20, limite), pais=pais)
+    ofertas = buscar_ofertas_jds_shopping(termo, usar_cache=True, limite=max(20, limite), pais=pais)
     ofertas = _ordenar_entrega_menor_preco(ofertas)
     return ofertas[:limite]
 
@@ -7275,6 +7361,11 @@ def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
         return False
     if va and not (va <= vaa and va <= vab):
         return False
+    # DualSense sem Edge na consulta não pode virar DualSense Edge.
+    q_toks = set(qa.split())
+    if "dualsense" in q_toks and "edge" not in va:
+        if "edge" in vaa or "edge" in vab:
+            return False
 
     if am != bm:
         return False

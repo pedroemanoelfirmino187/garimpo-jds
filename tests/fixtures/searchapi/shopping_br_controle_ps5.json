@@ -1,0 +1,36 @@
+{
+  "search_metadata": {"status": "Success"},
+  "search_parameters": {"engine": "google_shopping", "q": "controle ps5", "gl": "br", "hl": "pt"},
+  "shopping_results": [
+    {
+      "position": 1,
+      "product_id": "111",
+      "product_token": "token-ps5-amazon",
+      "title": "Controle sem fio DualSense Sony PS5 Branco",
+      "seller": "Amazon.com.br",
+      "price": "R$ 404,27",
+      "extracted_price": 404.27,
+      "link": "https://www.google.com/search?ibp=oshop&q=controle+ps5"
+    },
+    {
+      "position": 2,
+      "product_id": "222",
+      "product_token": "token-ps5-ml",
+      "title": "Controle DualSense Sony PlayStation 5",
+      "seller": "Mercado Livre",
+      "price": "R$ 419,00",
+      "extracted_price": 419.0,
+      "link": "https://www.google.com/shopping?q=controle"
+    },
+    {
+      "position": 3,
+      "product_id": "333",
+      "product_token": "token-ps5-shopee",
+      "title": "Controle Compatível com PS5 sem fio",
+      "seller": "Shopee",
+      "price": "R$ 89,90",
+      "extracted_price": 89.9,
+      "link": "https://www.google.com/search?ibp=oshop"
+    }
+  ]
+}

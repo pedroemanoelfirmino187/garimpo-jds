@@ -1,0 +1,24 @@
+{
+  "search_metadata": {"status": "Success"},
+  "search_parameters": {"engine": "google_shopping", "q": "sony dualsense ps5", "gl": "us", "hl": "en"},
+  "shopping_results": [
+    {
+      "position": 1,
+      "product_token": "token-us-amazon",
+      "title": "Sony DualSense Wireless Controller for PS5",
+      "seller": "Amazon.com",
+      "price": "$74.99",
+      "extracted_price": 74.99,
+      "link": "https://www.google.com/search?ibp=oshop"
+    },
+    {
+      "position": 2,
+      "product_token": "token-us-walmart",
+      "title": "Sony DualSense PS5 Wireless Controller",
+      "seller": "Walmart",
+      "price": "$69.00",
+      "extracted_price": 69.0,
+      "link": "https://www.google.com/search?ibp=oshop"
+    }
+  ]
+}

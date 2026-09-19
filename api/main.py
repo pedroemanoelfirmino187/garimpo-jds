@@ -36,6 +36,7 @@ from garimpo_jds import (  # noqa: E402
     _chave_cache,
     _chaves_env,
     _normalizar_pais,
+    buscar_ofertas_jds_shopping,
     buscar_ofertas_por_pais,
     buscar_ofertas_serper_shopping,
     isolar_produto_mais_barato,
@@ -47,7 +48,7 @@ from garimpo_jds import (  # noqa: E402
 app = FastAPI(
     title="JDS Economiza API",
     version="1.3.1",
-    description="Garimpa o menor preço no Google (Serper): BR (Amazon/ML/Shopee) ou US (Amazon/eBay).",
+    description="Garimpa o menor preço: SearchApi (BR/US) com fallback Serper.",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -238,8 +239,8 @@ def health():
     return {
         "ok": True,
         "servico": "jds-economiza",
-        "fonte": "serper",
-        "deploy": "v43",
+        "fonte": "searchapi+serper",
+        "deploy": "v44",
         "mercados": ["BR", "US"],
         "afiliados": {
             "amazon_br": ID_AMAZON,
@@ -261,6 +262,7 @@ def health():
                 "SCRAPINGANT_API_KEY_2",
             )),
             "serper": bool(_chaves_env("SERPER_API_KEY", "SERPER_KEY")),
+            "searchapi": bool(_chaves_env("SEARCHAPI_API_KEY", "SEARCHAPI_KEY")),
             "app_token": bool((os.environ.get("JDS_API_TOKEN") or "").strip()),
             "cache_sqlite": True,
             "cache_ttl_horas": 2,
@@ -272,14 +274,22 @@ def health():
 
 def _buscar_serper_pais(termo, pais):
     try:
-        # A API pública entrega somente ofertas confirmadas pelo Product Matcher V4.
-        # Não usa o fallback "BUSCA NA LOJA" como se fosse uma oferta comparável.
-        return buscar_ofertas_serper_shopping(termo, usar_cache=True, pais=pais, limite=20)
+        return buscar_ofertas_jds_shopping(termo, usar_cache=True, pais=pais, limite=20)
     except Exception:
         raise HTTPException(
             status_code=500,
             detail=mensagem_servidor("erro_servidor", pais),
         )
+
+
+@app.get("/admin/searchapi")
+def admin_searchapi(_: bool = Depends(_autorizar_app)):
+    """Uso de créditos SearchApi. Exige JDS_API_TOKEN. Fora do /garimpar."""
+    if not (os.environ.get("JDS_API_TOKEN") or "").strip():
+        raise HTTPException(status_code=404, detail="not found")
+    from jds_searchapi import consultar_uso_searchapi
+
+    return consultar_uso_searchapi()
 
 
 @app.get("/garimpar")

@@ -1,0 +1,13 @@
+{
+  "search_metadata": {"status": "Success"},
+  "offers": [
+    {
+      "position": 1,
+      "title": "Controle Compatível com PS5 sem fio",
+      "price": "R$ 89,90",
+      "extracted_price": 89.9,
+      "link": "https://shopee.com.br/Controle-PS5-i.1608031728.2309811123",
+      "merchant": {"name": "Shopee"}
+    }
+  ]
+}

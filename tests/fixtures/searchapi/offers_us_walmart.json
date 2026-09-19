@@ -1,0 +1,12 @@
+{
+  "offers": [
+    {
+      "position": 1,
+      "title": "Sony DualSense PS5 Wireless Controller",
+      "price": "$69.00",
+      "extracted_price": 69.0,
+      "link": "https://www.walmart.com/ip/Sony-DualSense-PS5-Wireless-Controller/123456789",
+      "merchant": {"name": "Walmart"}
+    }
+  ]
+}

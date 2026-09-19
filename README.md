@@ -70,13 +70,16 @@ Scraping no servidor é bloqueado. Cole as chaves em **Railway → Variables** (
 | Amazon | [Associates](https://associados.amazon.com.br) → Product Advertising API | `AMAZON_ACCESS_KEY`, `AMAZON_SECRET_KEY`, `AMAZON_PARTNER_TAG=jdseconomiz0e-20` |
 | Shopee | [Afiliados](https://affiliate.shopee.com.br) → Open API | `SHOPEE_APP_ID`, `SHOPEE_SECRET` |
 | Mercado Livre | [developers.mercadolivre.com.br](https://developers.mercadolivre.com.br) | `MELI_ACCESS_TOKEN` |
-| Google (Serper) | [serper.dev](https://serper.dev) | `SERPER_API_KEY` |
+| Google (SearchApi) | [searchapi.io](https://www.searchapi.io) | `SEARCHAPI_API_KEY` |
+| Google (Serper, fallback) | [serper.dev](https://serper.dev) | `SERPER_API_KEY` |
 | ZenRows (grátis) | [zenrows.com](https://www.zenrows.com) | `ZENROWS_API_KEY` |
 | ScrapingAnt (grátis) | [scrapingant.com](https://scrapingant.com) | `SCRAPINGANT_API_KEY` |
 
-No ar o motor pede o Google pela **Serper** (JSON, sem raspar). Sem essa chave o Google continua bloqueado no Railway. ZenRows/ScrapingAnt ficam de reserva.
+No ar o motor pede o Google pela **SearchApi** (Shopping + Product Offers, no máximo 3 ofertas por busca). Sem `SEARCHAPI_API_KEY` cai no fallback **Serper**. A chave nunca vai para o app nem para o GitHub.
 
-Depois do deploy, `/health` mostra `serper` como `true` quando `SERPER_API_KEY` está no Railway.
+Variáveis opcionais no Railway: `SEARCHAPI_MAX_PRODUCT_OFFERS=3`, `SEARCHAPI_CACHE_TTL=900`, `SEARCHAPI_OFFERS_CACHE_TTL=900`.
+
+Depois do deploy, `/health` mostra `searchapi` como `true` quando `SEARCHAPI_API_KEY` está no Railway.
 
 ## 6. Suíte de qualidade
 
