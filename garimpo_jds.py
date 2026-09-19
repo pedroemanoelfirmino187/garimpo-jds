@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import html as _html_std
 import io
 import os
 import random
@@ -6159,7 +6160,208 @@ def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
     return len(comuns) / max(1, len(r["tokens"])) >= 0.70
 
 
-def _jds_item_serper(termo, bruto, pais="BR"):
+def _jds_chave_anuncio_exato(url, plat):
+    """Identidade do anúncio (ASIN / MLB / Shopee i.shop.item). Sem IDs do Google."""
+    if not url or not plat or not _url_anuncio_exato(url, plat):
+        return ""
+    if plat == "amazon":
+        asin = _asin_amazon(url)
+        return f"amazon:{asin}" if asin else ""
+    if plat == "mercado_livre":
+        mlb = _id_mlb(url)
+        if mlb:
+            return f"ml:{mlb}"
+        achado = re.search(r"/p/(MLB[0-9]+)", url or "", re.I)
+        return f"ml:{achado.group(1).upper()}" if achado else ""
+    if plat == "shopee":
+        achado = re.search(r"-i\.(\d+)\.(\d+)", url or "", re.I)
+        if achado:
+            return f"shopee:{achado.group(1)}.{achado.group(2)}"
+        if "/product/" in (url or "").lower():
+            path = urllib.parse.urlparse(url).path.lower().rstrip("/")
+            return f"shopee:{path}" if path else ""
+        return ""
+    return ""
+
+
+def _jds_host_loja_do_card(url, plat, pais="BR"):
+    if not url or not plat:
+        return False
+    host = urllib.parse.urlparse(url).netloc.lower()
+    pais = _normalizar_pais(pais)
+    if plat == "amazon":
+        if pais == "US":
+            return _host_amazon_eua(url)
+        return "amazon.com.br" in host
+    if plat == "mercado_livre":
+        return "mercadolivre." in host or "mercadolibre." in host
+    if plat == "shopee":
+        return "shopee.com.br" in host
+    if plat == "ebay":
+        return "ebay.com" in host
+    return False
+
+
+def _jds_destino_attr_shopping(bruto):
+    """Converte data-redirect-url / data-target-url / ping em URL http, se houver."""
+    raw = _html_std.unescape(str(bruto or "").strip().replace("&amp;", "&"))
+    if not raw:
+        return ""
+    if raw.startswith("/url?") or raw.startswith("/aclk?"):
+        raw = "https://www.google.com" + raw
+    parsed = urllib.parse.urlparse(raw)
+    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    for chave in ("url", "q", "adurl", "u"):
+        cand = (qs.get(chave) or [""])[0]
+        if str(cand).startswith("http"):
+            raw = _html_std.unescape(urllib.parse.unquote(cand))
+            break
+    dest = _desempacotar_link_google(raw) or raw
+    dest = dest.split("#")[0].strip()
+    if not dest.startswith("http"):
+        return ""
+    if _url_e_google(dest):
+        return ""
+    return dest
+
+
+def _jds_attrs_url_shopping(html):
+    """Só os três atributos combinados com o card. Não varre href genérico."""
+    texto = html or ""
+    pats = (
+        (re.compile(r'data-redirect-url=(["\'])(.*?)\1', re.I | re.S), "data-redirect-url"),
+        (re.compile(r'data-target-url=(["\'])(.*?)\1', re.I | re.S), "data-target-url"),
+        (re.compile(r'(?:^|[\s])ping=(["\'])(.*?)\1', re.I | re.S), "ping"),
+    )
+    achados = []
+    for cre, nome in pats:
+        for m in cre.finditer(texto):
+            dest = _jds_destino_attr_shopping(m.group(2))
+            if not dest:
+                continue
+            achados.append({
+                "attr": nome,
+                "url": dest,
+                "pos": m.start(),
+            })
+    return achados
+
+
+_JDS_ROTULOS_SOURCE_SHOPPING = (
+    "Amazon.com.br - Retail",
+    "Amazon.com.br - Seller",
+    "Amazon.com.br",
+    "Amazon",
+    "Mercado Livre",
+    "Mercado Libre",
+    "mercadolivre.com.br",
+    "mercadolibre.com.br",
+    "Shopee",
+    "shopee.com.br",
+)
+
+
+def _jds_rotulo_esta_dentro_de_url(html_l, i):
+    trecho = html_l[max(0, i - 220):i]
+    http = max(trecho.rfind("http://"), trecho.rfind("https://"))
+    if http < 0:
+        return False
+    depois = trecho[http:]
+    if any(sep in depois for sep in ('"', "'", "<", ">", " ")):
+        return False
+    return True
+
+
+def _jds_rotulo_a_frente(html_l, pos, rotulos):
+    """Primeiro rótulo de loja depois do atributo (mesmo bloco do card)."""
+    melhor = None
+    limite = min(len(html_l), pos + 2500)
+    for lab in rotulos:
+        needle = _sem_acento(lab or "").lower().strip()
+        if not needle:
+            continue
+        start = pos
+        while start < limite:
+            i = html_l.find(needle, start, limite)
+            if i < 0:
+                break
+            if not _jds_rotulo_esta_dentro_de_url(html_l, i):
+                cand = (i - pos, -len(needle), needle)
+                if melhor is None or cand < melhor:
+                    melhor = cand
+                break
+            start = i + 1
+    return melhor[2] if melhor else ""
+
+
+def _jds_attr_e_do_source(html, pos_attr, source):
+    """True se o próximo rótulo visível depois do atributo é o source do card."""
+    src = _sem_acento(source or "").lower().strip()
+    if not src:
+        return False
+    html_l = _sem_acento(html or "").lower()
+    rotulos = _JDS_ROTULOS_SOURCE_SHOPPING + (source,)
+    visto = _jds_rotulo_a_frente(html_l, pos_attr, rotulos)
+    return bool(visto) and visto == src
+
+
+def _jds_html_ponte_shopping(url, baixar=None):
+    if not url:
+        return ""
+    if callable(baixar):
+        try:
+            corpo = baixar(url)
+        except TypeError:
+            corpo = ""
+        return corpo or ""
+    corpo, _origem = _baixar_url_loja(url, timeout=12, avisar=False)
+    return corpo or ""
+
+
+def _jds_resolver_url_anuncio_google_shopping(link, source, pais="BR", html=None, baixar=None):
+    """URL exata da loja do card, extraída do HTML do Google Shopping. Sem chute de ID."""
+    pais = _normalizar_pais(pais)
+    plat = _loja_do_texto(source)
+    ponte = (link or "").strip()
+    if plat not in _lojas_do_pais(pais) or not ponte:
+        return ""
+    if html is None:
+        if not (_link_e_google_shopping(ponte) or "google." in ponte.lower()):
+            return ""
+        html = _jds_html_ponte_shopping(ponte, baixar=baixar)
+    if not html or _pagina_bloqueada(html):
+        return ""
+    preferidos = []
+    for bloco in _jds_attrs_url_shopping(html):
+        url = bloco["url"]
+        if not _jds_host_loja_do_card(url, plat, pais=pais):
+            continue
+        if not _url_anuncio_exato(url, plat):
+            continue
+        if _plataforma_loja(url) != plat:
+            continue
+        chave = _jds_chave_anuncio_exato(url, plat)
+        if not chave:
+            continue
+        if not _jds_attr_e_do_source(html, bloco.get("pos") or 0, source):
+            continue
+        preferidos.append((chave, url))
+    unicos = []
+    vistos = set()
+    for chave, url in preferidos:
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        unicos.append((chave, url))
+    if len(unicos) != 1:
+        return ""
+    escolhida = unicos[0][1]
+    if not _url_anuncio_exato(escolhida, plat) or _url_e_google(escolhida):
+        return ""
+    return _url_canonica_loja(escolhida, plat, pais=pais)
+
+
+def _jds_item_serper(termo, bruto, pais="BR", baixar=None):
     """Converte um item bruto do Shopping preservando IDs quando o Google fornecer."""
     if not isinstance(bruto, dict):
         return None
@@ -6170,13 +6372,28 @@ def _jds_item_serper(termo, bruto, pais="BR"):
     fonte = bloco["source"]
     if not titulo or not _source_loja_oficial(fonte, pais=pais):
         return None
-    href = _href_item_serper(bruto)
-    if not href:
-        href = _desempacotar_link_google(str(bloco.get("link") or ""))
-    if not href or _url_e_busca_loja(href):
-        return None
-    plat = _loja_do_texto(fonte) or _plataforma_loja(href)
+    plat = _loja_do_texto(fonte)
     if plat not in _lojas_do_pais(pais):
+        return None
+    ponte = str(bloco.get("link") or "").strip()
+    href = _href_item_serper(bruto)
+    href_plat = _plataforma_loja(href) if href else ""
+    ja_exata = bool(
+        href
+        and href_plat == plat
+        and _url_anuncio_exato(href, plat)
+        and not _url_e_google(href)
+        and _jds_host_loja_do_card(href, plat, pais=pais)
+        and not _url_e_google(ponte)
+        and not _link_e_google_shopping(ponte)
+    )
+    if _link_e_google_shopping(ponte) or _url_e_google(ponte) or not ja_exata:
+        href = _jds_resolver_url_anuncio_google_shopping(
+            ponte, fonte, pais=pais, baixar=baixar,
+        )
+    if not href or _url_e_google(href) or _url_e_busca_loja(href):
+        return None
+    if not _url_anuncio_exato(href, plat) or _plataforma_loja(href) != plat:
         return None
     preco = _preco_item_serper(bruto, pais=pais)
     if preco <= 0:
@@ -6184,19 +6401,27 @@ def _jds_item_serper(termo, bruto, pais="BR"):
     item = _item_google(termo, titulo, preco, href, bloco.get("imageUrl"), plat, origem="serper", pais=pais)
     if not item:
         return None
+    if not _url_anuncio_exato(item.get("url") or "", plat) or _url_e_google(item.get("url") or ""):
+        return None
+    foto_json = str(bloco.get("imageUrl") or "").strip()
+    if foto_json.startswith("//"):
+        foto_json = "https:" + foto_json
+    if foto_json.startswith("http"):
+        item["foto"] = foto_json
     # Preserva possíveis identificadores fornecidos pelo Shopping/API.
     for k in ("asin", "gtin", "ean", "mpn", "sku", "productId", "product_id", "itemId", "item_id"):
         if bruto.get(k) not in (None, ""):
             item[k] = str(bruto.get(k))
     item["identidade_titulo"] = _titulo_limpo_oferta(titulo)
+    item["source_serper"] = fonte
     return item
 
 
-def _jds_extrair_candidatos(termo, itens, pais="BR", limite=40):
+def _jds_extrair_candidatos(termo, itens, pais="BR", limite=40, baixar=None):
     candidatos = []
     vistos = set()
     for bruto in itens or []:
-        item = _jds_item_serper(termo, bruto, pais=pais)
+        item = _jds_item_serper(termo, bruto, pais=pais, baixar=baixar)
         if not item:
             continue
         url = _url_chave(item.get("url") or "")
