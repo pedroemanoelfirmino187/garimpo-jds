@@ -6361,7 +6361,176 @@ def _jds_resolver_url_anuncio_google_shopping(link, source, pais="BR", html=None
     return _url_canonica_loja(escolhida, plat, pais=pais)
 
 
-def _jds_item_serper(termo, bruto, pais="BR", baixar=None):
+def _jds_site_organic_loja(plat, pais="BR"):
+    """Host usado no q do Serper Organic (site:host título)."""
+    pais = _normalizar_pais(pais)
+    if plat == "amazon":
+        return "amazon.com" if pais == "US" else "amazon.com.br"
+    if plat == "mercado_livre":
+        return "mercadolivre.com.br"
+    if plat == "shopee":
+        return "shopee.com.br"
+    if plat == "ebay":
+        return "ebay.com"
+    return ""
+
+
+def _jds_url_listagem_proibida(url):
+    """Listagem/busca: nunca vira anúncio, mesmo se o Organic devolver."""
+    u = (url or "").lower()
+    if not u:
+        return True
+    if _url_e_google(url) or _url_e_busca_loja(url):
+        return True
+    path = urllib.parse.urlparse(url if u.startswith("http") else "https://x/" + u).path.lower()
+    return any(
+        x in u or x in path
+        for x in (
+            "/ofertas", "/deals", "/gp/goldbox", "/gp/bestsellers",
+            "/best-sellers", "/jm/search", "/s?k=",
+        )
+    )
+
+
+def _jds_organic_serper_site(q, pais="BR", num=10):
+    """POST /search sem strip de site:. Não reutiliza _organic_serper (esse remove site:)."""
+    loc = _serper_locale(pais)
+    q = re.sub(r"\s+", " ", (q or "").strip())
+    if not q:
+        return []
+    dados = _serper_post("/search", {
+        "q": q, "gl": loc["gl"], "hl": loc["hl"], "num": min(int(num or 10), 20),
+    })
+    if not isinstance(dados, dict):
+        return []
+    return [it for it in (dados.get("organic") or []) if isinstance(it, dict)]
+
+
+def _jds_html_pdp_fallback(url, baixar=None):
+    if not url:
+        return ""
+    if callable(baixar):
+        try:
+            return baixar(url) or ""
+        except TypeError:
+            return ""
+    return _jds_html_anuncio(url) or ""
+
+
+def _jds_preco_pagina_igual_ao_card(claimed, page_prices):
+    """Preço da PDP que confirma o card; vazio se nenhum valor da página bater."""
+    if not _jds_preco_bate_com_pagina(claimed, page_prices):
+        return 0.0
+    try:
+        claimed = float(claimed)
+    except (TypeError, ValueError):
+        return 0.0
+    melhor = None
+    for p in page_prices:
+        try:
+            n = float(p)
+        except (TypeError, ValueError):
+            continue
+        if melhor is None or abs(n - claimed) < abs(melhor - claimed):
+            melhor = n
+    return round(float(melhor), 2) if melhor is not None else 0.0
+
+
+def _jds_organic_link_anuncio(it, plat, pais="BR"):
+    if not isinstance(it, dict):
+        return ""
+    href = _href_organico_anuncio(it)
+    if not href:
+        href = _desempacotar_link_google(str(it.get("link") or it.get("url") or ""))
+    if not href or _jds_url_listagem_proibida(href) or _url_e_google(href):
+        return ""
+    if _plataforma_loja(href) != plat:
+        return ""
+    if not _url_anuncio_exato(href, plat):
+        return ""
+    if not _jds_host_loja_do_card(href, plat, pais=pais):
+        return ""
+    return _url_canonica_loja(href, plat, pais=pais)
+
+
+def _jds_pdp_fallback_confirma(termo, titulo_card, preco_card, url, plat, pais="BR", html=""):
+    """Confirma o MESMO anúncio na PDP. Sem chute: título/preço/domínio da página."""
+    if not html or _pagina_bloqueada(html) or not _resposta_util_loja(url, html):
+        return None
+    if _jds_url_listagem_proibida(url) or not _url_anuncio_exato(url, plat):
+        return None
+    if _plataforma_loja(url) != plat or not _jds_host_loja_do_card(url, plat, pais=pais):
+        return None
+    if not _jds_id_anuncio_na_pagina(url, plat, html):
+        return None
+    titulo_pagina = _jds_titulo_html_anuncio(html)
+    if not titulo_pagina:
+        return None
+    if _titulo_usado(titulo_card) or _titulo_usado(titulo_pagina):
+        return None
+    if not _titulo_shopping_ok(termo, titulo_card) or not _titulo_shopping_ok(termo, titulo_pagina):
+        return None
+    if not _jds_variante_bate(titulo_card, titulo_pagina):
+        return None
+    if not _jds_mesmo_produto(titulo_card, titulo_pagina, termo) and not _jds_v4_same_product(
+        termo, titulo_card, titulo_pagina
+    ):
+        tok_c = set(re.findall(r"[a-z0-9]{4,}", _sem_acento(titulo_card)))
+        tok_p = set(re.findall(r"[a-z0-9]{4,}", _sem_acento(titulo_pagina)))
+        if len(tok_c & tok_p) < 1:
+            return None
+    precos_pagina = _jds_precos_html_anuncio(html, pais=pais)
+    preco_ok = _jds_preco_pagina_igual_ao_card(preco_card, precos_pagina)
+    if preco_ok <= 0:
+        return None
+    return {"url": url, "titulo": titulo_pagina, "preco_num": preco_ok}
+
+
+def _jds_resolver_url_anuncio_fallback_serper(
+    termo,
+    titulo,
+    source,
+    pais="BR",
+    preco_card=0.0,
+    organic=None,
+    baixar=None,
+):
+    """Quando a ponte Google Shopping falha: Serper Organic site:loja + título do card."""
+    pais = _normalizar_pais(pais)
+    plat = _loja_do_texto(source)
+    site = _jds_site_organic_loja(plat, pais=pais)
+    if plat not in _lojas_do_pais(pais) or not site or not (titulo or "").strip():
+        return None
+    try:
+        preco_card = float(preco_card or 0)
+    except (TypeError, ValueError):
+        preco_card = 0.0
+    if preco_card <= 0:
+        return None
+    q = f"site:{site} {titulo.strip()}"
+    fn_org = organic or _jds_organic_serper_site
+    try:
+        hits = fn_org(q, pais=pais)
+    except TypeError:
+        hits = fn_org(q)
+    vistos = set()
+    for it in hits or []:
+        href = _jds_organic_link_anuncio(it, plat, pais=pais)
+        if not href or href in vistos:
+            continue
+        vistos.add(href)
+        html = _jds_html_pdp_fallback(href, baixar=baixar)
+        ok = _jds_pdp_fallback_confirma(
+            termo, titulo, preco_card, href, plat, pais=pais, html=html,
+        )
+        if ok:
+            return ok
+        if len(vistos) >= 5:
+            break
+    return None
+
+
+def _jds_item_serper(termo, bruto, pais="BR", baixar=None, organic=None):
     """Converte um item bruto do Shopping preservando IDs quando o Google fornecer."""
     if not isinstance(bruto, dict):
         return None
@@ -6391,11 +6560,37 @@ def _jds_item_serper(termo, bruto, pais="BR", baixar=None):
         href = _jds_resolver_url_anuncio_google_shopping(
             ponte, fonte, pais=pais, baixar=baixar,
         )
+    preco = _preco_item_serper(bruto, pais=pais)
+    href_ruim = (
+        not href
+        or _url_e_google(href)
+        or _url_e_busca_loja(href)
+        or _jds_url_listagem_proibida(href)
+        or not _url_anuncio_exato(href, plat)
+        or _plataforma_loja(href) != plat
+    )
+    if href_ruim:
+        # Testes da ponte passam só `baixar`: não disparar Organic de verdade.
+        if organic is None and baixar is not None:
+            return None
+        fb = _jds_resolver_url_anuncio_fallback_serper(
+            termo,
+            titulo,
+            fonte,
+            pais=pais,
+            preco_card=preco,
+            organic=organic,
+            baixar=baixar,
+        )
+        if not fb:
+            return None
+        href = fb["url"]
+        titulo = fb["titulo"]
+        preco = fb["preco_num"]
     if not href or _url_e_google(href) or _url_e_busca_loja(href):
         return None
     if not _url_anuncio_exato(href, plat) or _plataforma_loja(href) != plat:
         return None
-    preco = _preco_item_serper(bruto, pais=pais)
     if preco <= 0:
         return None
     item = _item_google(termo, titulo, preco, href, bloco.get("imageUrl"), plat, origem="serper", pais=pais)
@@ -6417,11 +6612,11 @@ def _jds_item_serper(termo, bruto, pais="BR", baixar=None):
     return item
 
 
-def _jds_extrair_candidatos(termo, itens, pais="BR", limite=40, baixar=None):
+def _jds_extrair_candidatos(termo, itens, pais="BR", limite=40, baixar=None, organic=None):
     candidatos = []
     vistos = set()
     for bruto in itens or []:
-        item = _jds_item_serper(termo, bruto, pais=pais, baixar=baixar)
+        item = _jds_item_serper(termo, bruto, pais=pais, baixar=baixar, organic=organic)
         if not item:
             continue
         url = _url_chave(item.get("url") or "")
