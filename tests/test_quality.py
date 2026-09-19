@@ -50,7 +50,7 @@ def test_matcher_rejeita_produtos_diferentes(a, b):
 @pytest.mark.parametrize(
     "query,candidate,expected",
     [
-        ("controle ps5", "Controle Sem Fio Compatível com PS5", True),
+        ("controle ps5", "Controle Sem Fio Compatível com PS5", False),
         ("controle ps5 sony", "Controle Sem Fio Compatível com PS5", False),
         ("controle ps5 sony", "Sony DualSense PS5", True),
         ("controle ps5 sony branco", "Sony DualSense PS5 Preto", False),
@@ -61,6 +61,54 @@ def test_matcher_rejeita_produtos_diferentes(a, b):
 def test_regras_da_consulta(query, candidate, expected):
     # Comparação do candidato consigo mesmo, usando a consulta como requisito.
     assert jds._jds_mesmo_produto(candidate, candidate, query) is expected
+
+
+@pytest.mark.parametrize(
+    "a,b,query",
+    [
+        ("Sony DualSense PS5 Branco", "Sony DualSense PS5", "controle ps5 sony"),
+        ("Apple iPhone 15 128GB Preto", "Apple iPhone 15 128GB", "iphone 15"),
+        ("Samsung Galaxy S24 256GB", "Samsung Galaxy S24 256GB 5G", "samsung galaxy s24"),
+        ("Samsung Galaxy S24 256GB Preto", "Samsung Galaxy S24 256GB Branco", "samsung galaxy s24"),
+        ("Apple iPhone 15 128GB", "Apple iPhone 15 128GB Seminovo", "iphone 15"),
+        ("Sony DualSense PS5", "Controle Genérico para PS5", "controle ps5"),
+    ],
+)
+def test_matcher_rejeita_atributo_explicito_sem_correspondencia(a, b, query):
+    assert jds._jds_mesmo_produto(a, b, query) is False
+
+
+def test_matcher_rejeita_compatível_mesmo_quando_a_consulta_e_generica():
+    titulo = "Controle Sem Fio Compatível com PS5"
+    assert jds._jds_mesmo_produto(titulo, titulo, "controle ps5") is False
+
+
+def test_agrupamento_so_retorna_anuncios_compativeis_par_a_par():
+    def oferta(titulo, plataforma, codigo):
+        return {
+            "titulo": titulo,
+            "plataforma": plataforma,
+            "url": {
+                "amazon": f"https://www.amazon.com.br/dp/{codigo}",
+                "mercado_livre": f"https://produto.mercadolivre.com.br/MLB-{codigo}",
+                "shopee": f"https://shopee.com.br/DualSense-i.10.{codigo}",
+            }[plataforma],
+            "preco_num": 400.0,
+            "foto": "https://img.example/dualsense.jpg",
+            "fonte": "serper",
+        }
+
+    ofertas = [
+        oferta("Sony DualSense PS5 Branco", "amazon", "B0CQKLS4RP"),
+        oferta("Sony DualSense PS5", "mercado_livre", "123456"),
+        oferta("Sony DualSense PS5 White", "shopee", "987654"),
+    ]
+    grupo = jds._jds_comparar_mesmo_produto("controle ps5 sony", ofertas)
+    assert {item["plataforma"] for item in grupo} == {"amazon", "shopee"}
+    assert all(
+        jds._jds_mesmo_produto(a["titulo"], b["titulo"], "controle ps5 sony")
+        for indice, a in enumerate(grupo) for b in grupo[indice + 1:]
+    )
 
 
 def test_card_nao_mistura_preco_imagem_titulo_url():

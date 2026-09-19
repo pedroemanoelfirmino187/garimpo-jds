@@ -6829,9 +6829,9 @@ def _jds_v4_tokens(s):
     return set(_jds_v4_norm(s).split())
 
 def _jds_v4_has_phrase(text, phrase):
-    n = _jds_v4_norm(text)
+    n = " " + _jds_v4_norm(text) + " "
     p = _jds_v4_norm(phrase)
-    return p in n
+    return bool(p) and f" {p} " in n
 
 def _jds_v4_features(s):
     n = _jds_v4_norm(s)
@@ -7025,6 +7025,12 @@ def _jds_hard_features(s):
     return n, toks, variants, conditions, caps, model_sigs
 
 def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
+    """Retorna ``True`` somente quando os dois títulos identificam o mesmo SKU.
+
+    O título de uma loja pode omitir uma variante que outra loja informa. Essa
+    omissão não é prova de equivalência: para comparação de preços, um atributo
+    material desconhecido é tratado como incompatível, não como curinga.
+    """
     ra = ref_titulo.get("titulo") if isinstance(ref_titulo, dict) else ref_titulo
     rb = cand_titulo.get("titulo") if isinstance(cand_titulo, dict) else cand_titulo
     q = consulta or ""
@@ -7034,6 +7040,22 @@ def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
     qa, ta, va, ca, capa, qm = _jds_hard_features(q)
     _, a, vaa, caa, cap_a, am = _jds_hard_features(ra)
     _, b, vab, cab, cap_b, bm = _jds_hard_features(rb)
+    fqa = _jds_v4_features(q)
+    fa = _jds_v4_features(ra)
+    fb = _jds_v4_features(rb)
+
+    # Um anúncio compatível, genérico ou paralelo não representa o produto
+    # original pesquisado. Mesmo dois anúncios desse tipo não são comparáveis
+    # sem uma identidade de fabricante verificável.
+    if "nao_original" in caa or "nao_original" in cab:
+        return False
+
+    # Um ID explícito e idêntico (EAN/GTIN/SKU etc.) é a única evidência que
+    # pode dispensar a descrição completa de atributos.
+    if fa["ids"] & fb["ids"]:
+        return True
+    if fa["ids"] and fb["ids"]:
+        return False
 
     # Condições incompatíveis: usado nunca entra em comparação com novo/não especificado.
     if ("usado" in ca and "usado" not in caa) or ("usado" in ca and "usado" not in cab):
@@ -7046,35 +7068,45 @@ def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
             return False
 
     # Original/compatível/paralelo/genérico são famílias diferentes.
-    if ("nao_original" in caa) != ("nao_original" in cab):
-        return False
     if "original" in ca:
         if "original" not in caa or "original" not in cab:
             return False
     if ("original" in caa) != ("original" in cab):
         return False
 
-    # Variantes fortes nunca podem ser misturadas.
-    if vaa.isdisjoint(vab) and (vaa or vab):
+    # Variante, capacidade, cor, plataforma e marca são dimensões do SKU.
+    # Se só um título informa uma delas, não há como declarar igualdade exata.
+    if vaa != vab:
         return False
     if va and not (va <= vaa and va <= vab):
         return False
 
-    # Modelo/geração explícitos divergentes: S24 != A55, 520BT != 510BT,
-    # G84 != G54. Quando ambos trazem assinaturas de modelo, elas precisam coincidir.
-    if am and bm and am.isdisjoint(bm):
+    if am != bm:
         return False
     if qm and not (qm <= am and qm <= bm):
         return False
 
-    # Compatibilidade explícita em apenas um anúncio é sinal de produto diferente.
-    if cap_a and cap_b and cap_a.isdisjoint(cap_b):
-        return False
-    # Para identidade exata, capacidade explícita em apenas um anúncio é
-    # insuficiente para afirmar que são o mesmo SKU.
-    if bool(cap_a) != bool(cap_b):
+    if cap_a != cap_b:
         return False
     if capa and not (capa <= cap_a and capa <= cap_b):
+        return False
+
+    for atributo in ("brands", "models", "platforms", "colors"):
+        if fa[atributo] != fb[atributo]:
+            return False
+        requerido = fqa[atributo]
+        if requerido and not requerido <= fa[atributo]:
+            return False
+
+    if fa["capacities"] != fb["capacities"]:
+        return False
+    if fqa["capacities"] and not fqa["capacities"] <= fa["capacities"]:
+        return False
+
+    # Categoria/plataforma por si só (ex.: "controle PS5") não identifica
+    # um produto. Exigimos uma âncora de fabricante ou modelo antes de somar
+    # preços de lojas diferentes.
+    if not (fa["brands"] or fa["models"] or am):
         return False
 
     return _jds_v4_same_product(q, ra, rb)
@@ -7091,16 +7123,41 @@ def _jds_maior_grupo_identico(consulta, candidatos):
     xs = [x for x in (candidatos or []) if isinstance(x, dict) and x.get("titulo")]
     if len(xs) <= 1:
         return xs
-    grupos = []
-    for ref in xs:
-        grupo = []
-        for x in xs:
-            if x is ref or _jds_mesmo_produto(ref.get("titulo"), x.get("titulo"), consulta):
-                grupo.append(x)
-        score = sum(_jds_pontuar_referencia(consulta, x) for x in grupo)
-        grupos.append((len(grupo), score, grupo))
-    grupos.sort(key=lambda g: (g[0], g[1]), reverse=True)
-    return grupos[0][2]
+    # Um grupo "em estrela" não basta: A pode ser compatível com B e C,
+    # enquanto B e C divergem numa variante omitida em A. Enumeramos cliques
+    # máximos para garantir que toda dupla devolvida foi aprovada pelo matcher.
+    adjacentes = {
+        i: {
+            j for j in range(len(xs))
+            if i != j and _jds_mesmo_produto(
+                xs[i].get("titulo"), xs[j].get("titulo"), consulta,
+            )
+        }
+        for i in range(len(xs))
+    }
+    cliques = []
+
+    def bron_kerbosch(r, p, x):
+        if not p and not x:
+            cliques.append(r)
+            return
+        # O pivô reduz a enumeração, importante quando a Serper devolve 40 cards.
+        pivotos = p | x
+        pivot = max(pivotos, key=lambda i: len(p & adjacentes[i])) if pivotos else None
+        for v in list(p - (adjacentes[pivot] if pivot is not None else set())):
+            bron_kerbosch(r | {v}, p & adjacentes[v], x & adjacentes[v])
+            p.remove(v)
+            x.add(v)
+
+    bron_kerbosch(set(), set(range(len(xs))), set())
+    melhor = max(
+        cliques or [{0}],
+        key=lambda grupo: (
+            len(grupo),
+            sum(_jds_pontuar_referencia(consulta, xs[i]) for i in grupo),
+        ),
+    )
+    return [xs[i] for i in sorted(melhor)]
 
 
 if __name__ == "__main__":
@@ -7130,4 +7187,3 @@ if __name__ == "__main__":
     else:
         print("[Info] Executando rotina completa de testes do motor de busca:")
         executar_testes_motor_busca()
-
