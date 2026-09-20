@@ -133,6 +133,40 @@ def _max_product_offers():
     return max(1, min(n, 5))
 
 
+def _max_requests_per_query():
+    try:
+        n = int((os.environ.get("SEARCHAPI_MAX_REQUESTS_PER_QUERY") or "5").strip() or 5)
+    except ValueError:
+        n = 5
+    return max(1, min(n, 8))
+
+
+class _OrcamentoSearchApi:
+    """Conta só HTTP real. Cache hit não gasta. Sem retry."""
+
+    def __init__(self, limite=None):
+        self.limite = _max_requests_per_query() if limite is None else max(1, int(limite))
+        self.usado = 0
+        self.atingido = False
+        self.engines = []
+        self.puladas = []
+
+    def restam(self):
+        return max(0, self.limite - self.usado)
+
+    def autorizar(self, engine, reservar=0):
+        engine = str(engine or "")
+        if self.usado + 1 + max(0, int(reservar or 0)) > self.limite:
+            self.atingido = True
+            self.puladas.append(engine)
+            return False
+        self.usado += 1
+        self.engines.append(engine)
+        if self.usado >= self.limite:
+            self.atingido = True
+        return True
+
+
 def _ttl_shopping():
     try:
         return max(30, int((os.environ.get("SEARCHAPI_CACHE_TTL") or "900").strip() or 900))
@@ -235,11 +269,14 @@ def _gravar_cache(chave, dados):
 
 
 def searchapi_request(params, http_get=None):
-    """GET SearchApi. params nunca devem incluir a chave em logs."""
+    """GET SearchApi. Uma tentativa. params nunca devem incluir a chave em logs."""
     http_get = http_get or _HTTP_GET
     if callable(http_get):
-        http, dados, bruto = http_get(dict(params))
-        return int(http or 0), dados if isinstance(dados, dict) else None, bruto or ""
+        try:
+            http, dados, bruto = http_get(dict(params))
+            return int(http or 0), dados if isinstance(dados, dict) else None, bruto or ""
+        except Exception as exc:
+            return 0, None, str(exc)[:180]
     chave = _chave_searchapi()
     if not chave:
         return 0, None, "sem_chave"
@@ -259,6 +296,13 @@ def searchapi_request(params, http_get=None):
         return resp.status_code, dados if isinstance(dados, dict) else None, bruto
     except Exception as exc:
         return 0, None, str(exc)[:180]
+
+
+def _pedir_searchapi(params, http_get=None, orcamento=None):
+    engine = str((params or {}).get("engine") or "")
+    if orcamento is not None and not orcamento.autorizar(engine):
+        return 0, None, "orcamento"
+    return searchapi_request(params, http_get=http_get)
 
 
 def consultar_uso_searchapi():
@@ -611,7 +655,22 @@ def _tem_ebay_confirmado(itens):
     return False
 
 
-def _ebay_product_por_item_id(item_id, usar_cache=True, http_get=None):
+def _loja_tem_pdp_exato(itens, plat):
+    plat = str(plat or "").strip()
+    if not plat:
+        return False
+    for p in itens or []:
+        if not isinstance(p, dict):
+            continue
+        if p.get("plataforma") != plat:
+            continue
+        orig = p.get("original_url") or p.get("url") or ""
+        if jds._url_anuncio_exato(orig, plat):
+            return True
+    return False
+
+
+def _ebay_product_por_item_id(item_id, usar_cache=True, http_get=None, orcamento=None):
     eid = re.sub(r"\D", "", str(item_id or ""))
     if len(eid) < 9:
         return None, 0
@@ -620,7 +679,7 @@ def _ebay_product_por_item_id(item_id, usar_cache=True, http_get=None):
         cached = _ler_cache(chave, _ttl_offers())
         if isinstance(cached, dict):
             return cached, 0
-    http, dados, _bruto = searchapi_request(
+    http, dados, bruto = _pedir_searchapi(
         {
             "engine": "ebay_product",
             "item_id": eid,
@@ -628,7 +687,10 @@ def _ebay_product_por_item_id(item_id, usar_cache=True, http_get=None):
             "country": "us",
         },
         http_get=http_get,
+        orcamento=orcamento,
     )
+    if bruto == "orcamento":
+        return None, 0
     if http >= 400 or not isinstance(dados, dict):
         return None, 1
     if usar_cache:
@@ -653,6 +715,7 @@ def confirmar_item_ebay_product(
     http_get=None,
     motivos=None,
     amostras=None,
+    orcamento=None,
 ):
     """Confirma oferta do ebay_search via SearchApi ebay_product, sem HTML."""
     pais = jds._normalizar_pais(pais)
@@ -669,7 +732,7 @@ def confirmar_item_ebay_product(
         _rejeitar(motivos, amostras, "url_nao_exata", item=item)
         return None, 0
     dados, nreq = _ebay_product_por_item_id(
-        eid, usar_cache=usar_cache, http_get=http_get,
+        eid, usar_cache=usar_cache, http_get=http_get, orcamento=orcamento,
     )
     prod = _item_estruturado_ebay_product(dados)
     if not prod:
@@ -768,13 +831,13 @@ def confirmar_item_ebay_product(
     return ok, nreq
 
 
-def _organic_ebay_search(termo, pais="US", usar_cache=True, http_get=None):
+def _organic_ebay_search(termo, pais="US", usar_cache=True, http_get=None, orcamento=None):
     chave = "ebay:" + chave_cache_searchapi(termo, pais)
     if usar_cache:
         cached = _ler_cache(chave, _ttl_shopping())
         if isinstance(cached, dict) and isinstance(cached.get("organic_results"), list):
             return cached.get("organic_results"), 0
-    http, dados, _bruto = searchapi_request(
+    http, dados, bruto = _pedir_searchapi(
         {
             "engine": "ebay_search",
             "q": termo,
@@ -782,7 +845,10 @@ def _organic_ebay_search(termo, pais="US", usar_cache=True, http_get=None):
             "country": "us",
         },
         http_get=http_get,
+        orcamento=orcamento,
     )
+    if bruto == "orcamento":
+        return [], 0
     if http >= 400 or not isinstance(dados, dict):
         return [], 1
     organic = dados.get("organic_results") or []
@@ -802,6 +868,7 @@ def completar_ebay_via_search(
     confirmar=True,
     motivos=None,
     amostras=None,
+    orcamento=None,
 ):
     """US: ebay_search → matcher → ebay_product(item_id) → matcher → EPN.
 
@@ -811,7 +878,7 @@ def completar_ebay_via_search(
     if pais != "US":
         return [], 0, 0, 0
     organic, req = _organic_ebay_search(
-        query, pais=pais, usar_cache=usar_cache, http_get=http_get,
+        query, pais=pais, usar_cache=usar_cache, http_get=http_get, orcamento=orcamento,
     )
     itens = []
     for bruto in organic:
@@ -837,6 +904,7 @@ def completar_ebay_via_search(
                 http_get=http_get,
                 motivos=motivos,
                 amostras=amostras,
+                orcamento=orcamento,
             )
             product_req += nreq
             if ok:
@@ -894,6 +962,7 @@ def buscar_ofertas_searchapi(
         _diag(status="SEARCHAPI_EMPTY", q=t, pais=pais)
         return [], "SEARCHAPI_EMPTY"
 
+    orcamento = _OrcamentoSearchApi()
     chave_shop = "shop:" + chave_cache_searchapi(t, pais)
     cache_hit = False
     shopping = None
@@ -909,11 +978,12 @@ def buscar_ofertas_searchapi(
         if not _chave_searchapi() and not callable(http_get or _HTTP_GET):
             _diag(status="SEARCHAPI_ERROR", q=t, pais=pais, erro="sem_chave", cache_hit=False)
             return [], "SEARCHAPI_ERROR"
-        http, dados, bruto = searchapi_request(
+        http, dados, bruto = _pedir_searchapi(
             {"engine": "google_shopping", "q": t, "gl": cfg["gl"], "hl": cfg["hl"]},
             http_get=http_get,
+            orcamento=orcamento,
         )
-        if http >= 400 or not isinstance(dados, dict):
+        if bruto == "orcamento" or http >= 400 or not isinstance(dados, dict):
             _diag(
                 status="SEARCHAPI_ERROR",
                 q=t,
@@ -923,6 +993,9 @@ def buscar_ofertas_searchapi(
                 cache_hit=False,
                 gl=cfg["gl"],
                 hl=cfg["hl"],
+                searchapi_requests=orcamento.usado,
+                searchapi_budget=orcamento.limite,
+                searchapi_budget_atingido=orcamento.atingido,
             )
             return [], "SEARCHAPI_ERROR"
         shopping = dados.get("shopping_results") or []
@@ -963,20 +1036,30 @@ def buscar_ofertas_searchapi(
         if item:
             itens.append(item)
 
-    plats_ok = {p.get("plataforma") for p in itens}
+    ebay_pdp_antes_po = _tem_ebay_confirmado(itens)
+    tokens_vistos = set()
     for cand in tokens:
-        if len(plats_ok) >= len(jds._lojas_do_pais(pais)) and len(itens) >= 1:
-            break
         tok = cand.get("product_token")
-        if not tok:
+        if not tok or tok in tokens_vistos:
+            continue
+        tokens_vistos.add(tok)
+        plat = cand.get("plataforma") or ""
+        if plat and _loja_tem_pdp_exato(itens, plat):
             continue
         chave_off = f"off:{cfg['pais']}:{cfg['hl']}:{_hash_token(tok)}"
         payload = None
         if usar_cache:
             payload = _ler_cache(chave_off, _ttl_offers())
         if not isinstance(payload, dict):
-            offers_req += 1
-            oh, odados, obruto = searchapi_request(
+            if cache_hit:
+                continue
+            reserva = 0
+            if pais == "US" and not ebay_pdp_antes_po:
+                reserva = 2 if confirmar else 1
+            if orcamento.restam() <= reserva:
+                orcamento.puladas.append("google_product_offers")
+                continue
+            oh, odados, obruto = _pedir_searchapi(
                 {
                     "engine": "google_product_offers",
                     "product_token": tok,
@@ -985,12 +1068,18 @@ def buscar_ofertas_searchapi(
                     "link": "resolved",
                 },
                 http_get=http_get,
+                orcamento=orcamento,
             )
+            if obruto == "orcamento":
+                continue
+            offers_req += 1
             if oh >= 400 or not isinstance(odados, dict):
                 continue
             payload = odados
             if usar_cache:
                 _gravar_cache(chave_off, payload)
+        if not isinstance(payload, dict):
+            continue
         offers = payload.get("offers") or []
         if not isinstance(offers, list):
             continue
@@ -1034,6 +1123,10 @@ def buscar_ofertas_searchapi(
         ebay_search_skip = "nao_us"
     elif _tem_ebay_confirmado(confirmados):
         ebay_search_skip = "ebay_ja_confirmado"
+    elif orcamento.restam() <= 0:
+        ebay_search_skip = "orcamento"
+        orcamento.atingido = True
+        orcamento.puladas.append("ebay_search")
     else:
         extra, ebay_search_requests, ebay_search_results, ebay_product_requests = completar_ebay_via_search(
             t,
@@ -1044,13 +1137,17 @@ def buscar_ofertas_searchapi(
             confirmar=confirmar,
             motivos=motivos,
             amostras=amostras,
+            orcamento=orcamento,
         )
+        if "ebay_search" in orcamento.puladas and not extra:
+            ebay_search_skip = "orcamento"
         for p in extra:
             if p.get("plataforma") == "ebay" and _tem_ebay_confirmado(confirmados):
                 continue
             confirmados.append(p)
 
     status = "SEARCHAPI_SUCCESS" if confirmados else "SEARCHAPI_EMPTY"
+    shopping_requests = orcamento.engines.count("google_shopping")
     etapas = {
         "shopping_results": len(shopping),
         "candidates": len(candidatos),
@@ -1063,6 +1160,11 @@ def buscar_ofertas_searchapi(
         "ebay_search_results": ebay_search_results,
         "ebay_product_requests": ebay_product_requests,
         "ebay_search_skip": ebay_search_skip,
+        "searchapi_requests": orcamento.usado,
+        "searchapi_budget": orcamento.limite,
+        "searchapi_budget_atingido": orcamento.atingido,
+        "searchapi_engines": list(orcamento.engines),
+        "searchapi_puladas": list(orcamento.puladas),
     }
     _diag(
         status=status,
@@ -1072,7 +1174,7 @@ def buscar_ofertas_searchapi(
         hl=cfg["hl"],
         currency=cfg["currency"],
         symbol=cfg["symbol"],
-        shopping_requests=0 if cache_hit else 1,
+        shopping_requests=shopping_requests,
         shopping_results=len(shopping),
         candidates=len(candidatos),
         product_offers_requests=offers_req,
@@ -1089,10 +1191,15 @@ def buscar_ofertas_searchapi(
         ebay_search_results=ebay_search_results,
         ebay_product_requests=ebay_product_requests,
         ebay_search_skip=ebay_search_skip,
+        searchapi_requests=orcamento.usado,
+        searchapi_budget=orcamento.limite,
+        searchapi_budget_atingido=orcamento.atingido,
+        searchapi_engines=list(orcamento.engines),
+        searchapi_puladas=list(orcamento.puladas),
     )
     print(
         "[SearchApi] "
-        f"shopping_requests={0 if cache_hit else 1} "
+        f"shopping_requests={shopping_requests} "
         f"shopping_results={len(shopping)} "
         f"candidates={len(candidatos)} "
         f"product_offers_requests={offers_req} "
@@ -1108,6 +1215,8 @@ def buscar_ofertas_searchapi(
         f"ebay_search_requests={ebay_search_requests} "
         f"ebay_product_requests={ebay_product_requests} "
         f"ebay_search_skip={ebay_search_skip or '-'} "
+        f"searchapi_requests={orcamento.usado}/{orcamento.limite} "
+        f"budget_atingido={str(orcamento.atingido).lower()} "
         f"fallback=false"
     )
     return confirmados[:limite], status

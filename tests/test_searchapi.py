@@ -97,6 +97,15 @@ def test_max_product_offers_padrao_3(monkeypatch):
     assert sap._max_product_offers() == 5
 
 
+def test_max_requests_per_query_padrao_5(monkeypatch):
+    monkeypatch.delenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", raising=False)
+    assert sap._max_requests_per_query() == 5
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "99")
+    assert sap._max_requests_per_query() == 8
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    assert sap._max_requests_per_query() == 5
+
+
 def test_nao_inventa_product_token():
     shopping = _load("shopping_br_controle_ps5.json")["shopping_results"]
     shopping.append({"title": "Sony DualSense", "seller": "Amazon.com.br", "extracted_price": 400})
@@ -479,3 +488,353 @@ def test_onze_ofertas_diagnostico_sem_rede():
         assert "titulo" in am
         assert "loja" in am
         assert "original_url" in am
+
+
+ITEM_ID_ORC = "226994069950"
+PDP_ORC = f"https://www.ebay.com/itm/{ITEM_ID_ORC}"
+TITULO_ORC = "Sony DualSense Wireless Controller for PS5"
+QUERY_ORC = "Sony DualSense PS5 controller"
+
+
+def _html_orc(titulo, preco, item_id):
+    extra = "x" * 80
+    return (
+        f"<html><head><meta property=\"og:title\" content=\"{titulo}\"></head>"
+        f"<body><span id=\"productTitle\">{titulo}</span>"
+        f"<span class=\"a-offscreen\">{preco}</span> item {item_id} {extra}</body></html>"
+    )
+
+
+def _baixar_us_orc(url):
+    u = (url or "").lower()
+    if "ebay.com/itm" not in u:
+        return ""
+    eid = jds._id_ebay(url) or "123456789012"
+    preco = "$35.00" if eid == ITEM_ID_ORC else "$74.99"
+    return _html_orc(TITULO_ORC, preco, eid)
+
+
+def _product_orc(item_id=ITEM_ID_ORC, title=None, price=35.0):
+    return {
+        "item": {
+            "item_id": item_id,
+            "title": title or TITULO_ORC,
+            "price": f"${price}",
+            "extracted_price": price,
+            "link": f"https://www.ebay.com/itm/{item_id}",
+            "condition": "New",
+            "main_image": "https://i.ebayimg.com/images/g/dualsense/s-l1600.jpg",
+        }
+    }
+
+
+def _organic_orc(**kwargs):
+    row = {
+        "title": TITULO_ORC,
+        "price": "$35.00",
+        "extracted_price": 35.0,
+        "link": PDP_ORC,
+        "item_id": ITEM_ID_ORC,
+        "thumbnail": "https://i.ebayimg.com/images/g/dualsense/s-l1600.jpg",
+        "seller": "eBay",
+    }
+    row.update(kwargs)
+    return row
+
+
+@pytest.fixture
+def cache_isolado(tmp_path, monkeypatch):
+    monkeypatch.setenv("CACHE_GARIMPO_DB", str(tmp_path / "orcamento.db"))
+    sap._MEM.clear()
+    jds._MEM_CACHE.clear()
+    yield
+    sap._MEM.clear()
+    jds._MEM_CACHE.clear()
+
+
+def test_1_us_sem_ebay_shopping_max_5_chega_ebay_product(cache_isolado):
+    visto = []
+    shopping = _load("shopping_us_dualsense.json")
+    shopping = dict(shopping)
+    shopping["shopping_results"] = [
+        x for x in shopping["shopping_results"] if x.get("seller") != "eBay"
+    ]
+
+    def http_get(params):
+        visto.append(dict(params))
+        engine = params.get("engine")
+        if engine == "google_shopping":
+            return 200, shopping, "{}"
+        if engine == "google_product_offers":
+            return 200, {"offers": []}, "{}"
+        if engine == "ebay_search":
+            return 200, {"organic_results": [_organic_orc()]}, "{}"
+        if engine == "ebay_product":
+            assert params.get("item_id") == ITEM_ID_ORC
+            return 200, _product_orc(), "{}"
+        return 200, {}, "{}"
+
+    result, status = sap.buscar_ofertas_searchapi(
+        QUERY_ORC, pais="US", usar_cache=False, http_get=http_get,
+        baixar=_baixar_us_orc, confirmar=True,
+    )
+    engines = [p.get("engine") for p in visto]
+    assert len(engines) <= 5
+    assert "ebay_search" in engines
+    assert "ebay_product" in engines
+    ebay = [p for p in result if p.get("plataforma") == "ebay"]
+    assert status == "SEARCHAPI_SUCCESS"
+    assert ebay
+    assert jds._id_ebay(ebay[0]["original_url"]) == ITEM_ID_ORC
+    assert jds._id_ebay(ebay[0].get("affiliate_url") or "") == ITEM_ID_ORC
+    assert "/itm/" + ITEM_ID_ORC in ebay[0]["original_url"]
+    assert ebay[0].get("confirmacao") == "ebay_product"
+
+
+def test_2_us_ebay_pdp_nao_chama_po_nem_ebay_search(cache_isolado):
+    visto = []
+    shopping = _load("shopping_us_dualsense.json")
+    shopping = dict(shopping)
+    rows = []
+    for x in shopping["shopping_results"]:
+        row = dict(x)
+        if row.get("seller") == "eBay":
+            row["link"] = PDP_ORC
+            row["extracted_price"] = 35.0
+            row["price"] = "$35.00"
+        rows.append(row)
+    shopping["shopping_results"] = rows
+
+    def http_get(params):
+        visto.append(dict(params))
+        if params.get("engine") == "google_shopping":
+            return 200, shopping, "{}"
+        if params.get("engine") == "ebay_search":
+            raise AssertionError("ebay_search nao deveria ser chamado")
+        if params.get("engine") == "ebay_product":
+            raise AssertionError("ebay_product nao deveria ser chamado")
+        if params.get("engine") == "google_product_offers":
+            assert params.get("product_token") != "token-us-ebay"
+            return 200, {"offers": []}, "{}"
+        return 200, {}, "{}"
+
+    result, status = sap.buscar_ofertas_searchapi(
+        QUERY_ORC, pais="US", usar_cache=False, http_get=http_get,
+        baixar=_baixar_us_orc, confirmar=True,
+    )
+    engines = [p.get("engine") for p in visto]
+    po_toks = [p.get("product_token") for p in visto if p.get("engine") == "google_product_offers"]
+    assert "ebay_search" not in engines
+    assert "token-us-ebay" not in po_toks
+    diag = sap.ultimo_diag_searchapi()
+    assert diag.get("ebay_search_skip") == "ebay_ja_confirmado"
+    ebay = next(p for p in result if p.get("plataforma") == "ebay")
+    assert status == "SEARCHAPI_SUCCESS"
+    assert jds._id_ebay(ebay["original_url"]) == ITEM_ID_ORC
+
+
+def test_3_matcher_rejeita_sem_ebay_product(cache_isolado):
+    visto = []
+    shopping = _load("shopping_us_dualsense.json")
+    shopping = dict(shopping)
+    shopping["shopping_results"] = [
+        x for x in shopping["shopping_results"] if x.get("seller") != "eBay"
+    ]
+
+    def http_get(params):
+        visto.append(params.get("engine"))
+        if params.get("engine") == "google_shopping":
+            return 200, shopping, "{}"
+        if params.get("engine") == "google_product_offers":
+            return 200, {"offers": []}, "{}"
+        if params.get("engine") == "ebay_search":
+            return 200, {"organic_results": [_organic_orc(
+                title="Sony DualSense Edge Wireless Controller for PS5",
+            )]}, "{}"
+        if params.get("engine") == "ebay_product":
+            raise AssertionError("ebay_product nao para candidato rejeitado")
+        return 200, {}, "{}"
+
+    result, _status = sap.buscar_ofertas_searchapi(
+        QUERY_ORC, pais="US", usar_cache=False, http_get=http_get,
+        baixar=_baixar_us_orc, confirmar=True,
+    )
+    diag = sap.ultimo_diag_searchapi()
+    assert diag.get("ebay_product_requests") == 0
+    assert "ebay_product" not in visto
+    assert not [p for p in result if p.get("plataforma") == "ebay"]
+
+
+def test_4_dez_iguais_usam_cache(cache_isolado):
+    visto = []
+    shopping = _load("shopping_us_dualsense.json")
+
+    def http_get(params):
+        visto.append(params.get("engine"))
+        if params.get("engine") == "google_shopping":
+            return 200, shopping, "{}"
+        if params.get("engine") == "google_product_offers":
+            tok = params.get("product_token")
+            mapa = {
+                "token-us-amazon": _load("offers_us_amazon.json"),
+                "token-us-walmart": _load("offers_us_walmart.json"),
+                "token-us-ebay": _load("offers_us_ebay.json"),
+            }
+            return 200, mapa.get(tok, {"offers": []}), "{}"
+        if params.get("engine") == "ebay_search":
+            return 200, {"organic_results": [_organic_orc()]}, "{}"
+        if params.get("engine") == "ebay_product":
+            return 200, _product_orc(), "{}"
+        return 200, {}, "{}"
+
+    por = []
+    for _i in range(10):
+        antes = len(visto)
+        sap.buscar_ofertas_searchapi(
+            QUERY_ORC, pais="US", usar_cache=True, http_get=http_get,
+            baixar=_baixar_us_orc, confirmar=True,
+        )
+        por.append(len(visto) - antes)
+    assert por[0] >= 1
+    assert por[0] <= 5
+    assert all(n == 0 for n in por[1:])
+    assert sum(por) == por[0]
+
+
+def test_5_consultas_diferentes_cache_separado(cache_isolado):
+    visto = []
+
+    def http_get(params):
+        visto.append((params.get("engine"), params.get("q") or params.get("product_token")))
+        if params.get("engine") == "google_shopping":
+            return 200, _load("shopping_us_dualsense.json"), "{}"
+        return 200, {"offers": []}, "{}"
+
+    sap.buscar_ofertas_searchapi(
+        QUERY_ORC, pais="US", usar_cache=True, http_get=http_get,
+        baixar=_baixar_us_orc, confirmar=False,
+    )
+    n1 = len(visto)
+    sap.buscar_ofertas_searchapi(
+        "Sony DualSense Edge PS5 controller", pais="US", usar_cache=True, http_get=http_get,
+        baixar=_baixar_us_orc, confirmar=False,
+    )
+    assert len(visto) > n1
+    shops = [q for eng, q in visto if eng == "google_shopping"]
+    assert len(shops) == 2
+    assert shops[0] != shops[1]
+
+
+def test_6_us_e_br_caches_separados_br_sem_ebay(cache_isolado):
+    visto = []
+
+    def http_get(params):
+        visto.append((params.get("engine"), params.get("gl") or params.get("country")))
+        if params.get("engine") == "ebay_search":
+            raise AssertionError("BR nao chama ebay_search")
+        if params.get("engine") == "ebay_product":
+            raise AssertionError("BR nao chama ebay_product")
+        if params.get("engine") == "google_shopping":
+            if params.get("gl") == "br":
+                return 200, _load("shopping_br_controle_ps5.json"), "{}"
+            return 200, _load("shopping_us_dualsense.json"), "{}"
+        return 200, {"offers": []}, "{}"
+
+    sap.buscar_ofertas_searchapi(
+        QUERY_ORC, pais="US", usar_cache=True, http_get=http_get,
+        baixar=_baixar_us_orc, confirmar=False,
+    )
+    n_us = len(visto)
+    sap.buscar_ofertas_searchapi(
+        "controle ps5", pais="BR", usar_cache=True, http_get=http_get,
+        baixar=_baixar_br, confirmar=False,
+    )
+    br_engines = [e for e, _g in visto[n_us:]]
+    assert "google_shopping" in br_engines
+    assert "ebay_search" not in br_engines
+    assert "ebay_product" not in br_engines
+    gls = [g for e, g in visto if e == "google_shopping"]
+    assert "us" in gls and "br" in gls
+    chave_us = "shop:" + sap.chave_cache_searchapi(QUERY_ORC, "US")
+    chave_br = "shop:" + sap.chave_cache_searchapi("controle ps5", "BR")
+    assert chave_us != chave_br
+    assert sap._ler_cache(chave_us, 900) is not None
+    assert sap._ler_cache(chave_br, 900) is not None
+
+
+def test_7_timeout_uma_tentativa(cache_isolado):
+    visto = []
+
+    def http_get(params):
+        visto.append(params.get("engine"))
+        raise TimeoutError("timed out")
+
+    result, status = sap.buscar_ofertas_searchapi(
+        QUERY_ORC, pais="US", usar_cache=False, http_get=http_get,
+        baixar=_baixar_us_orc, confirmar=True,
+    )
+    assert status == "SEARCHAPI_ERROR"
+    assert result == []
+    assert visto == ["google_shopping"]
+    diag = sap.ultimo_diag_searchapi()
+    assert "timed out" in str(diag.get("erro") or "")
+
+
+def test_8_product_token_duplicado_uma_po(cache_isolado):
+    visto = []
+    shopping = _load("shopping_us_dualsense.json")
+    shopping = dict(shopping)
+    rows = list(shopping["shopping_results"])
+    rows.append(dict(rows[0]))
+    shopping["shopping_results"] = rows
+
+    def http_get(params):
+        visto.append(dict(params))
+        if params.get("engine") == "google_shopping":
+            return 200, shopping, "{}"
+        return 200, {"offers": []}, "{}"
+
+    sap.buscar_ofertas_searchapi(
+        QUERY_ORC, pais="US", usar_cache=False, http_get=http_get,
+        baixar=_baixar_us_orc, confirmar=False,
+    )
+    po = [p.get("product_token") for p in visto if p.get("engine") == "google_product_offers"]
+    assert po.count("token-us-amazon") <= 1
+    assert len(po) == len(set(po))
+
+
+def test_9_economia_nao_altera_identidade_ebay(cache_isolado):
+    visto = []
+    shopping = _load("shopping_us_dualsense.json")
+    shopping = dict(shopping)
+    shopping["shopping_results"] = [
+        x for x in shopping["shopping_results"] if x.get("seller") != "eBay"
+    ]
+
+    def http_get(params):
+        visto.append(params.get("engine"))
+        if params.get("engine") == "google_shopping":
+            return 200, shopping, "{}"
+        if params.get("engine") == "google_product_offers":
+            return 200, {"offers": []}, "{}"
+        if params.get("engine") == "ebay_search":
+            return 200, {"organic_results": [_organic_orc()]}, "{}"
+        if params.get("engine") == "ebay_product":
+            return 200, _product_orc(), "{}"
+        return 200, {}, "{}"
+
+    result, _status = sap.buscar_ofertas_searchapi(
+        QUERY_ORC, pais="US", usar_cache=False, http_get=http_get,
+        baixar=_baixar_us_orc, confirmar=True,
+    )
+    ebay = [p for p in result if p.get("plataforma") == "ebay"][0]
+    assert ebay["titulo"] == TITULO_ORC
+    assert ebay["preco_num"] == pytest.approx(35.0)
+    assert ebay["plataforma"] == "ebay"
+    assert ebay["original_url"] == PDP_ORC
+    assert jds._id_ebay(ebay["original_url"]) == ITEM_ID_ORC
+    assert jds._id_ebay(ebay.get("affiliate_url") or "") == ITEM_ID_ORC
+    assert ebay.get("confirmacao") == "ebay_product"
+    assert "rover.ebay.com" in (ebay.get("affiliate_url") or "")
+    assert f"campid={jds.ID_EBAY_CAMPAIGN}" in (ebay.get("affiliate_url") or "")
+    assert len(visto) <= 5
