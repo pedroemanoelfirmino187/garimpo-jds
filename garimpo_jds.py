@@ -54,6 +54,15 @@ ID_AMAZON_US = (
 )
 ID_SHOPEE = "18381751263"
 ID_MERCADO_LIVRE = "mape592520"
+ID_EBAY_CAMPAIGN = (
+    (os.environ.get("EBAY_EPN_CAMPAIGN_ID") or os.environ.get("EBAY_CAMPID") or "").strip()
+    or "5339211741"
+)
+ID_EBAY_CUSTOM = (
+    (os.environ.get("EBAY_EPN_CUSTOM_ID") or os.environ.get("EBAY_CUSTOM_ID") or "").strip()
+    or "5339211530"
+)
+EBAY_EPN_ROVER = "711-53200-19255-0"
 
 
 def _normalizar_pais(pais):
@@ -377,20 +386,34 @@ def serializar_oferta_app(item, pais="BR"):
         texto = mensagem_servidor("ver_preco_loja", pais)
     else:
         texto = _formatar_preco(numero, pais=pais)
-    href = aplicar_afiliado_por_dominio(
-        _link_ver_oferta(p) or p.get("url") or p.get("link") or p.get("link_afiliado") or ""
+    plat = p.get("plataforma") or _plataforma_loja(
+        p.get("original_url") or p.get("url") or p.get("link") or ""
     )
+    original = (p.get("original_url") or "").strip()
+    if plat == "ebay":
+        eid = _id_ebay(original) or _id_ebay(p.get("url") or "") or _id_ebay(p.get("link") or "")
+        original = _pdp_ebay(eid) if eid else ""
+        href = _aplicar_afiliado_ebay(original) if original else ""
+        if href and not _ebay_afiliado_mesmo_item(original, href):
+            href = ""
+    else:
+        href = aplicar_afiliado_por_dominio(
+            _link_ver_oferta(p) or p.get("url") or p.get("link") or p.get("link_afiliado") or ""
+        )
+        if not original:
+            can = _url_canonica_loja(p.get("url") or p.get("link") or "", plat, pais=pais)
+            if _url_anuncio_exato(can, plat) and not _url_e_busca_loja(can) and not _url_e_google(can):
+                original = can
     imagem = (p.get("foto") or p.get("imagem") or p.get("image") or "").strip()
     if imagem.startswith("//"):
         imagem = "https:" + imagem
-    loja = (p.get("loja") or _nome_loja(p.get("plataforma")) or "").strip()
-    original = (p.get("original_url") or "").strip()
+    loja = (p.get("loja") or _nome_loja(plat) or "").strip()
     return {
         "titulo": titulo,
         "preco_formatado": texto,
         "preco_numerico": numero,
         "loja": loja,
-        "original_url": original or href,
+        "original_url": original,
         "affiliate_url": href,
         "link_afiliado": href,
         "imagem": imagem,
@@ -400,7 +423,7 @@ def serializar_oferta_app(item, pais="BR"):
         "url": href,
         "link": href,
         "foto": imagem,
-        "plataforma": p.get("plataforma") or _plataforma_loja(href),
+        "plataforma": plat or _plataforma_loja(href),
         "pais": pais,
         "selo": p.get("selo"),
         "campeao": bool(p.get("campeao")),
@@ -519,6 +542,10 @@ def gerar_link_afiliado(url_original, plataforma):
             url_direta = _desempacotar_link_google(url_limpa) or url_limpa
             if url_direta.startswith("http") and not _url_e_busca_loja(url_direta):
                 return _aplicar_afiliado_google(url_direta, plataforma)
+
+        if plataforma == "ebay":
+            eid = _id_ebay(url_limpa)
+            return _aplicar_afiliado_ebay(_pdp_ebay(eid)) if eid else ""
 
         if plataforma == "shopee":
             parsed_url = urllib.parse.urlparse(url_limpa)
@@ -657,7 +684,13 @@ def _detectar_plataforma(url):
         return "mercado_livre"
     if "ebay." in baixa:
         return "ebay"
-    return "mercado_livre"
+    if "walmart." in baixa:
+        return "walmart"
+    if "target." in baixa:
+        return "target"
+    if "bestbuy." in baixa:
+        return "bestbuy"
+    return ""
 
 
 NOMES_LOJA = {
@@ -735,9 +768,9 @@ def _url_canonica_loja(url, plat, pais="BR"):
                 return f"https://www.amazon.com/dp/{asin}"
             return f"https://www.amazon.com.br/dp/{asin}"
     if plat == "ebay":
-        itm = re.search(r"/itm/(?:[^/?#]+/)?(\d{9,})", href)
-        if itm:
-            return f"https://www.ebay.com/itm/{itm.group(1)}"
+        eid = _id_ebay(href)
+        if eid:
+            return _pdp_ebay(eid)
     return href
 
 
@@ -798,7 +831,9 @@ def _url_anuncio_exato(url, plat):
     if plat == "shopee":
         return "-i." in u or "/product/" in u
     if plat == "ebay":
-        return "/itm/" in u
+        if "rover.ebay" in u or "ebay.us/" in u:
+            return False
+        return bool(_id_ebay(url)) and "/itm/" in u and "/sch/" not in u
     if plat == "walmart":
         return "/ip/" in u and bool(re.search(r"/ip/.+/\d+", u))
     if plat == "target":
@@ -815,7 +850,7 @@ def _link_do_item_serper_card(produto):
     p = produto if isinstance(produto, dict) else {}
     plat = p.get("plataforma") or _plataforma_loja(p.get("url") or "")
     pais = _normalizar_pais(p.get("pais") or "BR")
-    for bruto in (p.get("url"), p.get("link"), p.get("link_afiliado")):
+    for bruto in (p.get("original_url"), p.get("url"), p.get("link"), p.get("link_afiliado")):
         h = (bruto or "").strip()
         if not h:
             continue
@@ -856,6 +891,8 @@ def _link_compra_do_card(produto):
     if fonte != "catalogo":
         if url.startswith("http") and not _url_e_busca_loja(url) and not _url_e_google(url):
             return aplicar_afiliado_por_dominio(url)
+        if plat == "ebay":
+            return ""
         if plat == "amazon":
             return _link_busca_amazon_us(q) if pais == "US" else _link_busca_amazon(q)
         if plat == "mercado_livre":
@@ -867,7 +904,8 @@ def _link_compra_do_card(produto):
         if plat == "amazon":
             return aplicar_tag_amazon_eua(url or _link_busca_amazon_us(q))
         if plat == "ebay":
-            return url or _link_busca_ebay(q)
+            eid = _id_ebay(url)
+            return aplicar_afiliado_por_dominio(_pdp_ebay(eid)) if eid else ""
         return url
     if plat == "amazon":
         return _link_busca_amazon(q)
@@ -935,7 +973,7 @@ def _eh_pagina_compra(url, plat):
             or "s.shopee.com.br" in u
         )
     if plat == "ebay":
-        return "/itm/" in u or "/i/" in u
+        return bool(_id_ebay(url)) and "/itm/" in u and "/sch/" not in u
     return False
 
 
@@ -955,6 +993,63 @@ def _asin_amazon(url):
 def _id_mlb(url):
     achado = re.search(r"MLB-?(\d{8,})", url or "", re.I)
     return achado.group(1) if achado else ""
+
+
+def _id_ebay(url):
+    """ITEM_ID de /itm/{id} ou do parâmetro mpre= do Rover. Sem inventar ID."""
+    bruto = urllib.parse.unquote(url or "").strip()
+    if not bruto:
+        return ""
+    parsed = urllib.parse.urlparse(bruto)
+    qs = urllib.parse.parse_qs(parsed.query)
+    alvos = [bruto]
+    for chave in ("mpre", "navurl"):
+        for val in qs.get(chave) or []:
+            alvos.append(urllib.parse.unquote(val or ""))
+    for alvo in alvos:
+        achado = re.search(r"/itm/(?:[^/?#]+/)?(\d{9,})", alvo)
+        if achado:
+            return achado.group(1)
+    for val in qs.get("item") or []:
+        if re.fullmatch(r"\d{9,}", str(val or "")):
+            return str(val)
+    return ""
+
+
+def _pdp_ebay(item_id):
+    eid = re.sub(r"\D", "", str(item_id or ""))
+    if len(eid) < 9:
+        return ""
+    return f"https://www.ebay.com/itm/{eid}"
+
+
+def _ebay_afiliado_mesmo_item(original_url, affiliate_url):
+    origem = _id_ebay(original_url)
+    destino = _id_ebay(affiliate_url)
+    return bool(origem) and origem == destino
+
+
+def _aplicar_afiliado_ebay(url):
+    """EPN no mesmo ITEM_ID. Nunca usa encurtador global nem /sch/."""
+    eid = _id_ebay(url)
+    pdp = _pdp_ebay(eid)
+    if not pdp:
+        return ""
+    camp = (ID_EBAY_CAMPAIGN or "").strip()
+    custom = (ID_EBAY_CUSTOM or "").strip()
+    if not camp:
+        return pdp
+    rastreado = (
+        f"https://rover.ebay.com/rover/1/{EBAY_EPN_ROVER}/1"
+        f"?mkevt=1&mkcid=1&mkrid={EBAY_EPN_ROVER}"
+        f"&campid={urllib.parse.quote(camp, safe='')}"
+        f"&customid={urllib.parse.quote(custom, safe='')}"
+        f"&toolid=10001"
+        f"&mpre={urllib.parse.quote(pdp, safe='')}"
+    )
+    if not _ebay_afiliado_mesmo_item(pdp, rastreado):
+        return ""
+    return rastreado
 
 
 def _titulo_parece_mesmo_produto(titulo_a, titulo_b):
@@ -1084,7 +1179,8 @@ def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NO
     elif plat == "mercado_livre":
         url_final = _link_busca_ml(titulo)
     elif plat == "ebay":
-        url_final = url if _url_anuncio_exato(url, "ebay") else _link_busca_ebay(titulo)
+        eid = _id_ebay(url)
+        url_final = _aplicar_afiliado_ebay(_pdp_ebay(eid)) if eid else ""
     else:
         url_final = _aplicar_afiliado_google(url, plat, pais=pais)
     foto_final = _foto_da_oferta(url_final, plat, foto) or _foto_da_oferta(url, plat, foto)
@@ -1553,7 +1649,9 @@ def _aplicar_afiliado_google(link_loja, plataforma=None, pais="BR"):
             if "shopee.com.br/search" in url_limpa.lower():
                 qs["sortBy"] = ["sales"]
                 qs.pop("order", None)
-        elif plat in {"ebay", "walmart", "target", "bestbuy"}:
+        elif plat == "ebay":
+            return _aplicar_afiliado_ebay(url_limpa)
+        elif plat in {"walmart", "target", "bestbuy"}:
             return url_limpa
         else:
             return url_limpa
@@ -6813,7 +6911,8 @@ def _jds_id_anuncio_na_pagina(url, plat, html):
     if plat == "shopee":
         return "-i." in (url or "").lower()
     if plat == "ebay":
-        return "/itm/" in (url or "").lower()
+        eid = _id_ebay(url)
+        return bool(eid) and eid in (html or "")
     if plat == "walmart":
         m = re.search(r"/ip/[^/?#]+/(\d+)", url or "", flags=re.I)
         return bool(m) and m.group(1) in (html or "")
@@ -6846,9 +6945,14 @@ def _url_pdp_para_confirmar(item):
     for url in candidatos:
         if not url:
             continue
+        if plat == "ebay" or _plataforma_loja(url) == "ebay":
+            eid = _id_ebay(url)
+            url = _pdp_ebay(eid) if eid else ""
+            if not url:
+                continue
         if _url_e_google(url) or _url_e_busca_loja(url):
             continue
-        if _url_anuncio_exato(url, plat):
+        if _url_anuncio_exato(url, plat or _plataforma_loja(url)):
             return url
     return ""
 
@@ -6902,6 +7006,13 @@ def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None, motivos=None, 
     if not pdp or not _url_anuncio_exato(pdp, plat) or _url_e_google(pdp) or _url_e_busca_loja(pdp):
         _anotar_rejeicao_confirmer(motivos, amostras, "url_nao_exata", item)
         return None
+    if plat == "ebay":
+        eid_pdp = _id_ebay(pdp)
+        for outro in (item.get("url"), item.get("link"), item.get("affiliate_url"), item.get("link_afiliado")):
+            eid_outro = _id_ebay(outro or "")
+            if eid_outro and eid_outro != eid_pdp:
+                _anotar_rejeicao_confirmer(motivos, amostras, "url_nao_exata", item)
+                return None
     if preco <= 0:
         _anotar_rejeicao_confirmer(motivos, amostras, "preco_nao_encontrado", item)
         return None
@@ -6944,6 +7055,14 @@ def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None, motivos=None, 
         return None
     if not _jds_preco_bate_com_pagina(preco, precos_pagina):
         _anotar_rejeicao_confirmer(motivos, amostras, "preco_nao_confere", item)
+        return None
+    if plat == "ebay" and pais != "US":
+        _anotar_rejeicao_confirmer(motivos, amostras, "loja_fora", item)
+        return None
+    origem = item.get("listing_source") if isinstance(item.get("listing_source"), dict) else {}
+    img_src = (origem.get("imagem") or "").strip()
+    if img_src and foto and img_src != foto.strip():
+        _anotar_rejeicao_confirmer(motivos, amostras, "confirmer_rejeitou", item)
         return None
     if not _jds_mesmo_produto(titulo, titulo_pagina, titulo) and not _jds_v4_same_product(titulo, titulo, titulo_pagina):
         tok_c = set(re.findall(r"[a-z0-9]{4,}", _sem_acento(titulo)))
@@ -6989,12 +7108,28 @@ def _jds_confirmar_listings(ofertas, pais="BR", baixar=None, motivos=None, amost
         vistos.add(plat)
         saida.append(ok)
     carimbada = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(saida, pais=pais))
+    final = []
     for p in carimbada:
         orig = (p.get("original_url") or "").strip()
+        plat = p.get("plataforma")
+        if plat == "ebay":
+            orig = _pdp_ebay(_id_ebay(orig) or _id_ebay(p.get("url") or ""))
+            aff = p.get("url") or p.get("link_afiliado") or p.get("affiliate_url") or ""
+            if not orig or not _ebay_afiliado_mesmo_item(orig, aff):
+                _anotar_rejeicao_confirmer(motivos, amostras, "url_nao_exata", p)
+                continue
+            if "rover.ebay.com" not in aff.lower() or f"campid={ID_EBAY_CAMPAIGN}" not in aff:
+                _anotar_rejeicao_confirmer(motivos, amostras, "url_nao_exata", p)
+                continue
+            p["original_url"] = orig
+            p["affiliate_url"] = aff
+            final.append(p)
+            continue
         if orig:
             p["original_url"] = orig
         p["affiliate_url"] = p.get("url") or p.get("link_afiliado")
-    return carimbada
+        final.append(p)
+    return final
 
 
 def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR"):

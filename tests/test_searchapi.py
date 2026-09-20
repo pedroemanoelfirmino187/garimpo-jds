@@ -68,6 +68,8 @@ def _baixar_us(url):
         return _html("Sony DualSense Wireless Controller for PS5", "$74.99", "B08H99BPJN", pais="US")
     if "walmart.com" in u:
         return _html("Sony DualSense PS5 Wireless Controller", "$69.00", "123456789", pais="US")
+    if "ebay.com" in u and "/itm/" in u:
+        return _html("Sony DualSense Wireless Controller for PS5", "$74.99", "123456789012", pais="US")
     return ""
 
 
@@ -202,6 +204,7 @@ def test_pipeline_us_gl_hl_usd():
     mapa = {
         "token-us-amazon": _load("offers_us_amazon.json"),
         "token-us-walmart": _load("offers_us_walmart.json"),
+        "token-us-ebay": _load("offers_us_ebay.json"),
     }
     ofertas, status = sap.buscar_ofertas_searchapi(
         "sony dualsense ps5",
@@ -263,6 +266,7 @@ def test_health_tem_searchapi():
     assert "searchapi" in data["chaves"]
     assert data["deploy"] == "v44"
     assert "searchapi" in data["fonte"]
+    assert data["afiliados"]["ebay"]
 
 
 def test_admin_searchapi_sem_token_nao_expoe():

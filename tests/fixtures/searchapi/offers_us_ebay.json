@@ -1,0 +1,13 @@
+{
+  "offers": [
+    {
+      "position": 1,
+      "title": "Sony DualSense Wireless Controller for PS5",
+      "price": "$74.99",
+      "extracted_price": 74.99,
+      "link": "https://www.ebay.com/itm/123456789012",
+      "merchant": {"name": "eBay"},
+      "thumbnail": "https://i.ebayimg.com/images/g/dualsense/s-l1600.jpg"
+    }
+  ]
+}

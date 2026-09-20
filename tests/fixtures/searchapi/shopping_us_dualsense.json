@@ -19,6 +19,15 @@
       "price": "$69.00",
       "extracted_price": 69.0,
       "link": "https://www.google.com/search?ibp=oshop"
+    },
+    {
+      "position": 3,
+      "product_token": "token-us-ebay",
+      "title": "Sony DualSense Wireless Controller for PS5",
+      "seller": "eBay",
+      "price": "$74.99",
+      "extracted_price": 74.99,
+      "link": "https://www.google.com/search?ibp=oshop"
     }
   ]
 }

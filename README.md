@@ -6,6 +6,7 @@ App de menor preço (Amazon, Mercado Livre, Shopee) com afiliados:
 - Amazon EUA `tag=jdseconomiza-20` (`AMAZON_TAG_US`)
 - Shopee `sub_id=18381751263`
 - Mercado Livre `identity=mape592520`
+- eBay EUA (EPN) `campid=5339211741` (`EBAY_EPN_CAMPAIGN_ID`), PDP `/itm/{id}`
 
 ## 1. No seu PC
 
@@ -70,6 +71,7 @@ Scraping no servidor é bloqueado. Cole as chaves em **Railway → Variables** (
 | Amazon | [Associates](https://associados.amazon.com.br) → Product Advertising API | `AMAZON_ACCESS_KEY`, `AMAZON_SECRET_KEY`, `AMAZON_PARTNER_TAG=jdseconomiz0e-20` |
 | Shopee | [Afiliados](https://affiliate.shopee.com.br) → Open API | `SHOPEE_APP_ID`, `SHOPEE_SECRET` |
 | Mercado Livre | [developers.mercadolivre.com.br](https://developers.mercadolivre.com.br) | `MELI_ACCESS_TOKEN` |
+| eBay EUA | [Partner Network](https://partnernetwork.ebay.com) | `EBAY_EPN_CAMPAIGN_ID=5339211741`, `EBAY_EPN_CUSTOM_ID=5339211530` |
 | Google (SearchApi) | [searchapi.io](https://www.searchapi.io) | `SEARCHAPI_API_KEY` |
 | Google (Serper, fallback) | [serper.dev](https://serper.dev) | `SERPER_API_KEY` |
 | ZenRows (grátis) | [zenrows.com](https://www.zenrows.com) | `ZENROWS_API_KEY` |

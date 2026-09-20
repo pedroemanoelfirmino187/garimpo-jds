@@ -476,6 +476,13 @@ def offer_para_item(query, offer, pais="BR", motivos=None, amostras=None):
     if pais == "US" and plat == "amazon" and not jds._host_amazon_eua(link):
         _rejeitar(motivos, amostras, "url_nao_exata", ofe=offer)
         return None
+    if plat == "ebay":
+        if pais != "US":
+            _rejeitar(motivos, amostras, "loja_fora", ofe=offer)
+            return None
+        if not jds._id_ebay(link) or "/sch/" in link.lower() or "ebay.us/" in link.lower():
+            _rejeitar(motivos, amostras, "url_nao_exata", ofe=offer)
+            return None
     if not jds._titulo_shopping_ok(query, titulo):
         _rejeitar(motivos, amostras, "titulo_rejeitado", ofe=offer)
         return None

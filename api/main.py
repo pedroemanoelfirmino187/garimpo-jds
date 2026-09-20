@@ -29,6 +29,7 @@ except ImportError:
 from garimpo_jds import (  # noqa: E402
     ID_AMAZON,
     ID_AMAZON_US,
+    ID_EBAY_CAMPAIGN,
     ID_MERCADO_LIVRE,
     ID_SHOPEE,
     ultimo_diag_serper,
@@ -248,6 +249,7 @@ def health():
             "amazon": ID_AMAZON,
             "shopee": ID_SHOPEE,
             "mercado_livre": ID_MERCADO_LIVRE,
+            "ebay": ID_EBAY_CAMPAIGN,
         },
         "chaves": {
             "amazon_paapi": bool(os.environ.get("AMAZON_ACCESS_KEY")),
