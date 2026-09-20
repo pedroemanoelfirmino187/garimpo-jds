@@ -456,6 +456,50 @@ def _plat_de_oferta(vendedor, url, pais="BR"):
     return plat or ""
 
 
+def _score_candidato_shopping(query, cand, pais="BR"):
+    item_ref = {
+        "titulo": cand.get("titulo") or "",
+        "url": cand.get("link") or "",
+        "plataforma": cand.get("plataforma") or "",
+        "preco_num": cand.get("preco_num") or 0,
+    }
+    score = jds._jds_pontuar_referencia(query, item_ref)
+    if cand.get("plataforma") in jds._lojas_do_pais(pais):
+        score += 25
+    return score
+
+
+def _escolher_candidato_product_page(query, candidatos, pais="BR"):
+    """Melhor candidato já filtrado, com product_id e sem product_token. Não inventa token."""
+    ranked = []
+    for cand in candidatos or []:
+        if not cand or cand.get("product_token") not in (None, ""):
+            continue
+        if cand.get("product_id") in (None, ""):
+            continue
+        ranked.append((_score_candidato_shopping(query, cand, pais), cand))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda x: -x[0])
+    return ranked[0][1]
+
+
+def _token_product_page_resposta(dados):
+    if not isinstance(dados, dict):
+        return None
+    prod = dados.get("product") if isinstance(dados.get("product"), dict) else {}
+    tok = prod.get("product_token")
+    if isinstance(tok, str) and tok.strip():
+        return tok.strip()
+    return None
+
+
+def _reserva_ebay_po(pais, confirmar, ebay_pdp_antes_po):
+    if jds._normalizar_pais(pais) == "US" and not ebay_pdp_antes_po:
+        return 2 if confirmar else 1
+    return 0
+
+
 def shopping_para_candidato(query, bruto, pais="BR"):
     if not isinstance(bruto, dict):
         return None
@@ -508,16 +552,7 @@ def selecionar_candidatos_token(query, shopping, pais="BR", limite=None):
         cand = shopping_para_candidato(query, bruto, pais=pais)
         if not cand or not cand.get("product_token"):
             continue
-        item_ref = {
-            "titulo": cand["titulo"],
-            "url": cand.get("link") or "",
-            "plataforma": cand.get("plataforma") or "",
-            "preco_num": cand.get("preco_num") or 0,
-        }
-        score = jds._jds_pontuar_referencia(query, item_ref)
-        if cand.get("plataforma") in jds._lojas_do_pais(pais):
-            score += 25
-        scored.append((score, cand))
+        scored.append((_score_candidato_shopping(query, cand, pais), cand))
     scored.sort(key=lambda x: -x[0])
     escolhidos = []
     vistos = set()
@@ -1067,10 +1102,12 @@ def buscar_ofertas_searchapi(
 
     tokens = selecionar_candidatos_token(t, shopping, pais=pais, limite=_max_product_offers())
     contagens_ids = _contagens_ids_candidatos(candidatos)
-    po_fila_candidatos = len(tokens)
-    po_fila_tokens_distintos = len(
-        {_hash_token(str(c.get("product_token"))) for c in tokens if c.get("product_token")}
-    )
+    page_cand = _escolher_candidato_product_page(t, candidatos, pais=pais)
+    product_page_requests = 0
+    product_page_recovered = 0
+    product_page_failed = 0
+    product_page_skipped = 0
+    product_page_product_tokens_recovered = 0
     offers_req = 0
     offers_recv = 0
     rejeitadas = 0
@@ -1097,28 +1134,45 @@ def buscar_ofertas_searchapi(
             itens.append(item)
 
     ebay_pdp_antes_po = _tem_ebay_confirmado(itens)
+    ebay_reserva = _reserva_ebay_po(pais, confirmar, ebay_pdp_antes_po)
+    usar_page = False
+    n_inicial = len(tokens)
+    if cache_hit or not page_cand:
+        product_page_skipped = 1
+    elif orcamento.restam() < 2 + ebay_reserva:
+        product_page_skipped = 1
+        orcamento.puladas.append("google_product_page")
+    else:
+        n_inicial = min(len(tokens), max(0, orcamento.restam() - 2 - ebay_reserva))
+        if n_inicial == 0 and tokens:
+            product_page_skipped = 1
+            n_inicial = len(tokens)
+        else:
+            usar_page = True
+
+    po_fila = list(tokens[:n_inicial] if usar_page else tokens)
     tokens_vistos = set()
-    for cand in tokens:
+
+    def _consumir_po(cand, reserva_extra=0):
+        nonlocal offers_req, offers_recv, rejeitadas
         tok = cand.get("product_token")
-        if not tok or tok in tokens_vistos:
-            continue
+        if not tok or not isinstance(tok, str) or tok in tokens_vistos:
+            return
         tokens_vistos.add(tok)
         plat = cand.get("plataforma") or ""
         if plat and _loja_tem_pdp_exato(itens, plat):
-            continue
+            return
         chave_off = f"off:{cfg['pais']}:{cfg['hl']}:{_hash_token(tok)}"
         payload = None
         if usar_cache:
             payload = _ler_cache(chave_off, _ttl_offers())
         if not isinstance(payload, dict):
             if cache_hit:
-                continue
-            reserva = 0
-            if pais == "US" and not ebay_pdp_antes_po:
-                reserva = 2 if confirmar else 1
+                return
+            reserva = ebay_reserva + max(0, int(reserva_extra or 0))
             if orcamento.restam() <= reserva:
                 orcamento.puladas.append("google_product_offers")
-                continue
+                return
             oh, odados, obruto = _pedir_searchapi(
                 {
                     "engine": "google_product_offers",
@@ -1131,18 +1185,18 @@ def buscar_ofertas_searchapi(
                 orcamento=orcamento,
             )
             if obruto == "orcamento":
-                continue
+                return
             offers_req += 1
             if oh >= 400 or not isinstance(odados, dict):
-                continue
+                return
             payload = odados
             if usar_cache:
                 _gravar_cache(chave_off, payload)
         if not isinstance(payload, dict):
-            continue
+            return
         offers = payload.get("offers") or []
         if not isinstance(offers, list):
-            continue
+            return
         offers_recv += len(offers)
         for ofe in offers:
             item = offer_para_item(t, ofe, pais=pais, motivos=motivos, amostras=amostras)
@@ -1150,6 +1204,62 @@ def buscar_ofertas_searchapi(
                 rejeitadas += 1
                 continue
             itens.append(item)
+
+    reserva_ciclo_page = 2 if usar_page else 0
+    for cand in po_fila:
+        _consumir_po(cand, reserva_extra=reserva_ciclo_page)
+
+    if usar_page:
+        pid = page_cand.get("product_id")
+        tok_rec = None
+        payload_page = None
+        chave_pp = f"pp:{cfg['pais']}:{cfg['hl']}:{_hash_token(str(pid))}"
+        if usar_cache:
+            payload_page = _ler_cache(chave_pp, _ttl_offers())
+        if not isinstance(payload_page, dict):
+            if orcamento.restam() <= ebay_reserva:
+                product_page_skipped = 1
+                orcamento.puladas.append("google_product_page")
+            else:
+                ph, pdados, pbruto = _pedir_searchapi(
+                    {
+                        "engine": "google_product_page",
+                        "product_id": pid,
+                        "gl": cfg["gl"],
+                        "hl": cfg["hl"],
+                    },
+                    http_get=http_get,
+                    orcamento=orcamento,
+                )
+                if pbruto == "orcamento":
+                    product_page_skipped = 1
+                else:
+                    product_page_requests += 1
+                    if ph >= 400 or not isinstance(pdados, dict):
+                        product_page_failed = 1
+                    else:
+                        payload_page = pdados
+                        if usar_cache:
+                            _gravar_cache(chave_pp, payload_page)
+        if isinstance(payload_page, dict):
+            tok_rec = _token_product_page_resposta(payload_page)
+            if tok_rec:
+                product_page_recovered = 1
+                product_page_product_tokens_recovered = 1
+                cand_rec = dict(page_cand)
+                cand_rec["product_token"] = tok_rec
+                po_fila.append(cand_rec)
+                _consumir_po(cand_rec, reserva_extra=0)
+            elif product_page_failed == 0:
+                product_page_failed = 1
+        if product_page_recovered == 0:
+            for cand in tokens[n_inicial:]:
+                _consumir_po(cand, reserva_extra=0)
+
+    po_fila_candidatos = len(po_fila)
+    po_fila_tokens_distintos = len(
+        {_hash_token(str(c.get("product_token"))) for c in po_fila if c.get("product_token")}
+    )
 
     apos_parser = len(itens)
     grupo = jds._jds_comparar_mesmo_produto(t, itens, pais=pais)
@@ -1214,6 +1324,11 @@ def buscar_ofertas_searchapi(
         **contagens_ids,
         "po_fila_candidatos": po_fila_candidatos,
         "po_fila_tokens_distintos": po_fila_tokens_distintos,
+        "product_page_requests": product_page_requests,
+        "product_page_recovered": product_page_recovered,
+        "product_page_failed": product_page_failed,
+        "product_page_skipped": product_page_skipped,
+        "product_page_product_tokens_recovered": product_page_product_tokens_recovered,
         "offers_received": offers_recv,
         "apos_parser": apos_parser,
         "apos_matcher": apos_matcher,
@@ -1243,6 +1358,11 @@ def buscar_ofertas_searchapi(
         **contagens_ids,
         po_fila_candidatos=po_fila_candidatos,
         po_fila_tokens_distintos=po_fila_tokens_distintos,
+        product_page_requests=product_page_requests,
+        product_page_recovered=product_page_recovered,
+        product_page_failed=product_page_failed,
+        product_page_skipped=product_page_skipped,
+        product_page_product_tokens_recovered=product_page_product_tokens_recovered,
         product_offers_requests=offers_req,
         offers_received=offers_recv,
         offers_rejected=rejeitadas,
@@ -1279,6 +1399,11 @@ def buscar_ofertas_searchapi(
         f"{contagens_ids['candidatos_com_immersive_product_page_token']} "
         f"po_fila_candidatos={po_fila_candidatos} "
         f"po_fila_tokens_distintos={po_fila_tokens_distintos} "
+        f"product_page_requests={product_page_requests} "
+        f"product_page_recovered={product_page_recovered} "
+        f"product_page_failed={product_page_failed} "
+        f"product_page_skipped={product_page_skipped} "
+        f"product_page_product_tokens_recovered={product_page_product_tokens_recovered} "
         f"product_offers_requests={offers_req} "
         f"offers_received={offers_recv} "
         f"apos_parser={apos_parser} "

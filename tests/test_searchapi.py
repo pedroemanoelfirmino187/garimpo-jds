@@ -193,6 +193,10 @@ def test_diagnostico_candidatos_antes_da_fila_po():
         visto.append(dict(params))
         if params.get("engine") == "google_shopping":
             return 200, {"shopping_results": shopping_results}, "{}"
+        if params.get("engine") == "google_product_page":
+            assert params.get("product_id") == "pid-2"
+            assert "product_token" not in params
+            return 200, {"product": {}}, "{}"
         assert "product_id" not in params
         assert params.get("engine") == "google_product_offers"
         assert params.get("product_token") in {"tok-a", "tok-b"}
@@ -950,3 +954,252 @@ def test_9_economia_nao_altera_identidade_ebay(cache_isolado):
     assert "rover.ebay.com" in (ebay.get("affiliate_url") or "")
     assert f"campid={jds.ID_EBAY_CAMPAIGN}" in (ebay.get("affiliate_url") or "")
     assert len(visto) <= 5
+
+
+def _br_shop_row(**kwargs):
+    row = {
+        "title": "Apple iPhone 15 128GB",
+        "seller": "Amazon.com.br",
+        "extracted_price": 4999.0,
+        "link": "https://www.google.com/search?ibp=oshop",
+    }
+    row.update(kwargs)
+    return row
+
+
+def test_product_page_recupera_token_e_chama_po(monkeypatch, cache_isolado):
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    monkeypatch.setenv("SEARCHAPI_MAX_PRODUCT_OFFERS", "5")
+    visto = []
+    shopping = [
+        _br_shop_row(position=1, product_token="tok-amz", seller="Amazon.com.br"),
+        _br_shop_row(position=2, product_token="tok-ml", seller="Mercado Livre"),
+        _br_shop_row(position=3, product_id="pid-sem-tok", seller="Shopee"),
+    ]
+
+    def http_get(params):
+        visto.append(dict(params))
+        engine = params.get("engine")
+        if engine == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        if engine == "google_product_page":
+            assert params.get("product_id") == "pid-sem-tok"
+            assert params.get("gl") == "br"
+            assert params.get("hl") == "pt"
+            assert not params.get("product_token")
+            return 200, {"product": {"product_token": "tok-recuperado"}}, "{}"
+        if engine == "google_product_offers":
+            assert "product_id" not in params
+            assert params.get("product_token")
+            return 200, {"offers": []}, "{}"
+        raise AssertionError(engine)
+
+    sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    engines = [p.get("engine") for p in visto]
+    assert engines[0] == "google_shopping"
+    assert engines.count("google_product_page") == 1
+    po = [p.get("product_token") for p in visto if p.get("engine") == "google_product_offers"]
+    assert "tok-recuperado" in po
+    assert "pid-sem-tok" not in po
+    assert all("product_id" not in p for p in visto if p.get("engine") == "google_product_offers")
+    assert len(visto) <= 5
+    diag = sap.ultimo_diag_searchapi()
+    assert diag["product_page_requests"] == 1
+    assert diag["product_page_recovered"] == 1
+    assert diag["product_page_failed"] == 0
+    assert diag["product_page_product_tokens_recovered"] == 1
+    dump = json.dumps(diag)
+    assert "tok-recuperado" not in dump
+    assert "tok-amz" not in dump
+    assert "pid-sem-tok" not in dump
+
+
+def test_product_page_sem_token_nao_chama_po_invalido(monkeypatch, cache_isolado):
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    monkeypatch.setenv("SEARCHAPI_MAX_PRODUCT_OFFERS", "5")
+    visto = []
+    shopping = [
+        _br_shop_row(position=1, product_token="tok-amz", seller="Amazon.com.br"),
+        _br_shop_row(position=2, product_id="pid-x", seller="Shopee"),
+    ]
+
+    def http_get(params):
+        visto.append(dict(params))
+        engine = params.get("engine")
+        if engine == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        if engine == "google_product_page":
+            return 200, {"product": {"title": "Apple iPhone 15 128GB"}}, "{}"
+        if engine == "google_product_offers":
+            assert params.get("product_token") == "tok-amz"
+            assert "product_id" not in params
+            return 200, {"offers": []}, "{}"
+        raise AssertionError(engine)
+
+    sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    po = [p for p in visto if p.get("engine") == "google_product_offers"]
+    assert all(p.get("product_token") == "tok-amz" for p in po)
+    diag = sap.ultimo_diag_searchapi()
+    assert diag["product_page_failed"] == 1
+    assert diag["product_page_recovered"] == 0
+    assert diag["product_page_product_tokens_recovered"] == 0
+    assert len(visto) <= 5
+
+
+def test_sem_product_id_nao_chama_product_page(monkeypatch, cache_isolado):
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    monkeypatch.setenv("SEARCHAPI_MAX_PRODUCT_OFFERS", "5")
+    visto = []
+    shopping = [
+        _br_shop_row(position=1, product_token="tok-amz", seller="Amazon.com.br"),
+        _br_shop_row(position=2, product_token="tok-ml", seller="Mercado Livre"),
+        _br_shop_row(position=3, product_token="tok-sh", seller="Shopee"),
+    ]
+
+    def http_get(params):
+        visto.append(dict(params))
+        if params.get("engine") == "google_product_page":
+            raise AssertionError("nao chama product_page sem product_id")
+        if params.get("engine") == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        return 200, {"offers": []}, "{}"
+
+    sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    assert "google_product_page" not in [p.get("engine") for p in visto]
+    diag = sap.ultimo_diag_searchapi()
+    assert diag["product_page_skipped"] == 1
+    assert diag["product_page_requests"] == 0
+
+
+def test_orcamento_nunca_ultrapassa_5_com_product_page(monkeypatch, cache_isolado):
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    monkeypatch.setenv("SEARCHAPI_MAX_PRODUCT_OFFERS", "5")
+    visto = []
+    shopping = [
+        _br_shop_row(position=i + 1, product_token=f"tok-{i}", seller="Amazon.com.br")
+        for i in range(6)
+    ]
+    shopping.append(_br_shop_row(position=7, product_id="pid-7", seller="Shopee"))
+
+    def http_get(params):
+        visto.append(dict(params))
+        engine = params.get("engine")
+        if engine == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        if engine == "google_product_page":
+            return 200, {"product": {"product_token": "tok-novo"}}, "{}"
+        return 200, {"offers": []}, "{}"
+
+    sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    assert len(visto) <= 5
+    diag = sap.ultimo_diag_searchapi()
+    assert diag["searchapi_requests"] <= 5
+    assert diag["searchapi_budget"] == 5
+
+
+def test_cenario_br_shopping_po_page_po_max_5(monkeypatch, cache_isolado):
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    monkeypatch.setenv("SEARCHAPI_MAX_PRODUCT_OFFERS", "5")
+    visto = []
+    shopping = [
+        _br_shop_row(position=1, product_token="tok-1", seller="Amazon.com.br"),
+        _br_shop_row(position=2, product_token="tok-2", seller="Mercado Livre"),
+        _br_shop_row(position=3, product_token="tok-3", seller="Shopee"),
+        _br_shop_row(position=4, product_id="pid-a", seller="Amazon.com.br"),
+        _br_shop_row(position=5, product_id="pid-b", seller="Mercado Livre"),
+        _br_shop_row(position=6, seller="Shopee"),
+        _br_shop_row(position=7, product_token="tok-1", seller="Amazon.com.br"),
+    ]
+
+    def http_get(params):
+        visto.append(dict(params))
+        engine = params.get("engine")
+        if engine == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        if engine == "google_product_page":
+            assert params.get("product_id") in {"pid-a", "pid-b"}
+            return 200, {"product": {"product_token": "tok-page"}}, "{}"
+        if engine == "google_product_offers":
+            assert "product_id" not in params
+            return 200, {"offers": []}, "{}"
+        raise AssertionError(engine)
+
+    sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    engines = [p.get("engine") for p in visto]
+    assert engines[0] == "google_shopping"
+    assert engines.count("google_shopping") == 1
+    assert engines.count("google_product_page") == 1
+    assert engines.count("google_product_offers") <= 3
+    assert len(visto) == 5
+    assert engines == [
+        "google_shopping",
+        "google_product_offers",
+        "google_product_offers",
+        "google_product_page",
+        "google_product_offers",
+    ]
+    assert visto[-1].get("product_token") == "tok-page"
+    diag = sap.ultimo_diag_searchapi()
+    assert diag["searchapi_engines"] == engines
+    assert diag["searchapi_requests"] == 5
+    assert diag["searchapi_budget_atingido"] is True
+    dump = json.dumps(diag)
+    assert "tok-page" not in dump
+    assert "pid-a" not in dump
+
+
+def test_sem_candidato_elegivel_page_comportamento_anterior(monkeypatch, cache_isolado):
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    monkeypatch.setenv("SEARCHAPI_MAX_PRODUCT_OFFERS", "3")
+    visto = []
+    shopping = [
+        _br_shop_row(position=1, product_token="tok-1", seller="Amazon.com.br"),
+        _br_shop_row(position=2, product_token="tok-2", seller="Mercado Livre"),
+        _br_shop_row(position=3, product_token="tok-3", seller="Shopee"),
+    ]
+
+    def http_get(params):
+        visto.append(dict(params))
+        if params.get("engine") == "google_product_page":
+            raise AssertionError("sem candidato page")
+        if params.get("engine") == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        return 200, {"offers": []}, "{}"
+
+    sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    engines = [p.get("engine") for p in visto]
+    assert engines == [
+        "google_shopping",
+        "google_product_offers",
+        "google_product_offers",
+        "google_product_offers",
+    ]
+    diag = sap.ultimo_diag_searchapi()
+    assert diag["product_page_skipped"] == 1
+    assert diag["product_offers_requests"] == 3
+
+
+def test_product_page_nao_altera_allowlist_usado_matcher_confirmer():
+    assert jds._lojas_do_pais("BR") == ("amazon", "mercado_livre", "shopee")
+    assert "magazine_luiza" not in jds._lojas_do_pais("BR")
+    assert jds._titulo_usado("iPhone 15 128GB seminovo") is True
+    assert jds._titulo_usado("iPhone 15 128GB") is False
+    assert jds._jds_mesmo_produto(
+        "Apple iPhone 15 128GB", "Apple iPhone 15 128GB", "iphone 15 128gb"
+    ) is True
+    assert jds._jds_mesmo_produto(
+        "Apple iPhone 15 128GB", "Apple iPhone 15 256GB", "iphone 15 128gb"
+    ) is False
+    assert hasattr(jds, "_jds_confirmar_listings")
