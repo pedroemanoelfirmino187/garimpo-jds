@@ -195,6 +195,56 @@ def _hash_token(token):
     return hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:24]
 
 
+def _copiar_id_opcional(bruto, chave):
+    """Copia identificador só se o Shopping já trouxe valor; nunca inventa."""
+    if not isinstance(bruto, dict):
+        return None
+    val = bruto.get(chave)
+    if val in (None, ""):
+        return None
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        texto = str(val).strip()
+        return texto or None
+    if isinstance(val, str):
+        texto = val.strip()
+        return texto or None
+    return None
+
+
+def _contagens_ids_candidatos(candidatos):
+    """Contagens seguras: hashes truncados, nunca token/ID cru."""
+    lista = list(candidatos or [])
+    hashes_token = []
+    hashes_pid = []
+    com_mid = 0
+    com_imm = 0
+    for cand in lista:
+        tok = cand.get("product_token")
+        if tok not in (None, ""):
+            hashes_token.append(_hash_token(str(tok)))
+        pid = cand.get("product_id")
+        if pid not in (None, ""):
+            hashes_pid.append(_hash_token(str(pid)))
+        if cand.get("merchant_id") not in (None, ""):
+            com_mid += 1
+        if cand.get("immersive_product_page_token") not in (None, ""):
+            com_imm += 1
+    com_token = len(hashes_token)
+    distintos_tok = len(set(hashes_token))
+    return {
+        "candidatos_com_product_token": com_token,
+        "candidatos_sem_product_token": len(lista) - com_token,
+        "product_token_distintos": distintos_tok,
+        "product_token_duplicados": max(0, com_token - distintos_tok),
+        "candidatos_com_product_id": len(hashes_pid),
+        "product_id_distintos": len(set(hashes_pid)),
+        "candidatos_com_merchant_id": com_mid,
+        "candidatos_com_immersive_product_page_token": com_imm,
+    }
+
+
 def _conectar():
     caminho = jds._arquivo_cache_sqlite()
     caminho.parent.mkdir(parents=True, exist_ok=True)
@@ -434,7 +484,7 @@ def shopping_para_candidato(query, bruto, pais="BR"):
         preco_n = float(preco) if preco not in (None, "") else 0.0
     except (TypeError, ValueError):
         preco_n = jds._preco_para_numero(str(bruto.get("price") or ""), pais=pais)
-    return {
+    cand = {
         "titulo": titulo,
         "seller": seller,
         "link": link,
@@ -444,6 +494,11 @@ def shopping_para_candidato(query, bruto, pais="BR"):
         "position": bruto.get("position"),
         "imagem": str(bruto.get("thumbnail") or bruto.get("image") or "").strip(),
     }
+    for chave in ("product_id", "merchant_id", "immersive_product_page_token"):
+        val = _copiar_id_opcional(bruto, chave)
+        if val is not None:
+            cand[chave] = val
+    return cand
 
 
 def selecionar_candidatos_token(query, shopping, pais="BR", limite=None):
@@ -1011,6 +1066,11 @@ def buscar_ofertas_searchapi(
             candidatos.append(cand)
 
     tokens = selecionar_candidatos_token(t, shopping, pais=pais, limite=_max_product_offers())
+    contagens_ids = _contagens_ids_candidatos(candidatos)
+    po_fila_candidatos = len(tokens)
+    po_fila_tokens_distintos = len(
+        {_hash_token(str(c.get("product_token"))) for c in tokens if c.get("product_token")}
+    )
     offers_req = 0
     offers_recv = 0
     rejeitadas = 0
@@ -1151,6 +1211,9 @@ def buscar_ofertas_searchapi(
     etapas = {
         "shopping_results": len(shopping),
         "candidates": len(candidatos),
+        **contagens_ids,
+        "po_fila_candidatos": po_fila_candidatos,
+        "po_fila_tokens_distintos": po_fila_tokens_distintos,
         "offers_received": offers_recv,
         "apos_parser": apos_parser,
         "apos_matcher": apos_matcher,
@@ -1177,6 +1240,9 @@ def buscar_ofertas_searchapi(
         shopping_requests=shopping_requests,
         shopping_results=len(shopping),
         candidates=len(candidatos),
+        **contagens_ids,
+        po_fila_candidatos=po_fila_candidatos,
+        po_fila_tokens_distintos=po_fila_tokens_distintos,
         product_offers_requests=offers_req,
         offers_received=offers_recv,
         offers_rejected=rejeitadas,
@@ -1202,6 +1268,17 @@ def buscar_ofertas_searchapi(
         f"shopping_requests={shopping_requests} "
         f"shopping_results={len(shopping)} "
         f"candidates={len(candidatos)} "
+        f"candidatos_com_product_token={contagens_ids['candidatos_com_product_token']} "
+        f"candidatos_sem_product_token={contagens_ids['candidatos_sem_product_token']} "
+        f"product_token_distintos={contagens_ids['product_token_distintos']} "
+        f"product_token_duplicados={contagens_ids['product_token_duplicados']} "
+        f"candidatos_com_product_id={contagens_ids['candidatos_com_product_id']} "
+        f"product_id_distintos={contagens_ids['product_id_distintos']} "
+        f"candidatos_com_merchant_id={contagens_ids['candidatos_com_merchant_id']} "
+        f"candidatos_com_immersive_product_page_token="
+        f"{contagens_ids['candidatos_com_immersive_product_page_token']} "
+        f"po_fila_candidatos={po_fila_candidatos} "
+        f"po_fila_tokens_distintos={po_fila_tokens_distintos} "
         f"product_offers_requests={offers_req} "
         f"offers_received={offers_recv} "
         f"apos_parser={apos_parser} "

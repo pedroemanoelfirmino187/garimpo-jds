@@ -113,6 +113,118 @@ def test_nao_inventa_product_token():
     assert all(c.get("product_token") for c in cands)
 
 
+def test_shopping_preserva_ids_sem_inventar():
+    query = "controle ps5 sony"
+    com_ids = sap.shopping_para_candidato(
+        query,
+        {
+            "title": "Sony DualSense PS5",
+            "seller": "Amazon.com.br",
+            "extracted_price": 404.27,
+            "product_token": "tok-real",
+            "product_id": "111",
+            "merchant_id": "m-9",
+            "immersive_product_page_token": "imm-abc",
+        },
+        "BR",
+    )
+    assert com_ids["product_id"] == "111"
+    assert com_ids["merchant_id"] == "m-9"
+    assert com_ids["immersive_product_page_token"] == "imm-abc"
+    sem_ids = sap.shopping_para_candidato(
+        query,
+        {
+            "title": "Sony DualSense PS5",
+            "seller": "Amazon.com.br",
+            "extracted_price": 404.27,
+            "product_token": "tok-real",
+        },
+        "BR",
+    )
+    assert "product_id" not in sem_ids
+    assert "merchant_id" not in sem_ids
+    assert "immersive_product_page_token" not in sem_ids
+    assert sem_ids["product_token"] == "tok-real"
+
+
+def test_diagnostico_candidatos_antes_da_fila_po():
+    visto = []
+    shopping_results = [
+        {
+            "position": 1,
+            "title": "Sony DualSense PS5",
+            "seller": "Amazon.com.br",
+            "extracted_price": 404.27,
+            "product_token": "tok-a",
+            "product_id": "pid-1",
+            "merchant_id": "mer-1",
+            "link": "https://www.google.com/search?ibp=oshop",
+        },
+        {
+            "position": 2,
+            "title": "Sony DualSense PS5",
+            "seller": "Mercado Livre",
+            "extracted_price": 419.0,
+            "product_token": "tok-a",
+            "product_id": "pid-1",
+            "link": "https://www.google.com/search?ibp=oshop",
+        },
+        {
+            "position": 3,
+            "title": "Sony DualSense PS5",
+            "seller": "Shopee",
+            "extracted_price": 89.9,
+            "product_id": "pid-2",
+            "immersive_product_page_token": "imm-x",
+            "link": "https://www.google.com/search?ibp=oshop",
+        },
+        {
+            "position": 4,
+            "title": "Sony DualSense PS5",
+            "seller": "Amazon.com.br",
+            "extracted_price": 410.0,
+            "product_token": "tok-b",
+            "product_id": "pid-3",
+            "link": "https://www.google.com/search?ibp=oshop",
+        },
+    ]
+
+    def _get(params):
+        visto.append(dict(params))
+        if params.get("engine") == "google_shopping":
+            return 200, {"shopping_results": shopping_results}, "{}"
+        assert "product_id" not in params
+        assert params.get("engine") == "google_product_offers"
+        assert params.get("product_token") in {"tok-a", "tok-b"}
+        return 200, {"offers": []}, "{}"
+
+    sap.buscar_ofertas_searchapi(
+        "controle ps5 sony",
+        pais="BR",
+        usar_cache=False,
+        http_get=_get,
+        confirmar=False,
+    )
+    diag = sap.ultimo_diag_searchapi()
+    assert diag["candidates"] == 4
+    assert diag["candidatos_com_product_token"] == 3
+    assert diag["candidatos_sem_product_token"] == 1
+    assert diag["product_token_distintos"] == 2
+    assert diag["product_token_duplicados"] == 1
+    assert diag["candidatos_com_product_id"] == 4
+    assert diag["product_id_distintos"] == 3
+    assert diag["candidatos_com_merchant_id"] == 1
+    assert diag["candidatos_com_immersive_product_page_token"] == 1
+    assert diag["po_fila_candidatos"] == 2
+    assert diag["po_fila_tokens_distintos"] == 2
+    dump = json.dumps(diag)
+    for cru in ("tok-a", "tok-b", "pid-1", "pid-2", "pid-3", "mer-1", "imm-x"):
+        assert cru not in dump
+    po = [p for p in visto if p.get("engine") == "google_product_offers"]
+    assert {p.get("product_token") for p in po} <= {"tok-a", "tok-b"}
+    assert all("product_id" not in p for p in po)
+
+
 def test_parser_rejeita_google_search():
     offer = {
         "title": "Sony DualSense PS5",
