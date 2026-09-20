@@ -2870,6 +2870,9 @@ def _parsear_ofertas_google(html, termo, origem="", limite=8):
 
 
 _ULTIMO_DIAG_SERPER = {}
+_SERPER_HTTP_STATS = {"timeouts": 0, "errors": 0}
+HTTP_TIMEOUT_SERPER_POST = 18
+HTTP_TIMEOUT_SERPER_SHOPPING = 25
 
 
 def ultimo_diag_serper():
@@ -2881,6 +2884,22 @@ def _chave_serper():
     return chaves[0] if chaves else ""
 
 
+def _serper_foi_timeout(exc):
+    if isinstance(exc, TimeoutError):
+        return True
+    if requests is not None:
+        tipos = (requests.Timeout,)
+        extra = getattr(requests, "exceptions", None)
+        if extra is not None:
+            tipos = tipos + tuple(
+                t for t in (getattr(extra, "ReadTimeout", None), getattr(extra, "ConnectTimeout", None)) if t
+            )
+        if isinstance(exc, tipos):
+            return True
+    nome = type(exc).__name__.lower()
+    return "timeout" in nome or "timed out" in str(exc or "").lower()
+
+
 def _serper_post(caminho, corpo):
     chave = _chave_serper()
     if not chave or requests is None:
@@ -2890,15 +2909,21 @@ def _serper_post(caminho, corpo):
             f"https://google.serper.dev{caminho}",
             headers={"X-API-KEY": chave, "Content-Type": "application/json"},
             json=corpo,
-            timeout=18,
+            timeout=HTTP_TIMEOUT_SERPER_POST,
         )
         if resp.status_code >= 400:
             print(f"[Serper] HTTP {resp.status_code}")
+            _SERPER_HTTP_STATS["errors"] += 1
             return {}
         dados = resp.json() if resp.text else {}
         return dados if isinstance(dados, dict) else {}
     except Exception as e:
-        print(f"[Serper] {e}")
+        if _serper_foi_timeout(e):
+            _SERPER_HTTP_STATS["timeouts"] += 1
+            print("[Serper] timeout")
+        else:
+            _SERPER_HTTP_STATS["errors"] += 1
+            print("[Serper] erro")
         return {}
 
 
@@ -3164,14 +3189,19 @@ def _post_serper_shopping(q, pais="BR", num=40):
                 "hl": loc["hl"],
                 "num": min(int(num or 20), 40),
             },
-            timeout=25,
+            timeout=HTTP_TIMEOUT_SERPER_SHOPPING,
         )
         http = resp.status_code
         if http >= 400:
+            _SERPER_HTTP_STATS["errors"] += 1
             return http, [], loc, (resp.text or "")[:180]
         dados = resp.json() if resp.text else {}
     except Exception as e:
-        return 0, [], loc, str(e)[:180]
+        if _serper_foi_timeout(e):
+            _SERPER_HTTP_STATS["timeouts"] += 1
+            return 0, [], loc, "timeout"
+        _SERPER_HTTP_STATS["errors"] += 1
+        return 0, [], loc, "erro"
     if not isinstance(dados, dict):
         return http, [], loc, ""
     cru = [it for it in (dados.get("shopping") or []) if isinstance(it, dict)]
@@ -7318,7 +7348,14 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
     http, cru, loc, erro = _post_serper_shopping(_consulta_serper_shopping(t), pais=pais, num=40)
     if http >= 400 or not cru:
         _ULTIMO_DIAG_SERPER.clear()
-        _ULTIMO_DIAG_SERPER.update({"q": t, "http": http, "shopping": len(cru or []), "erro": erro or "sem_resultados"})
+        _ULTIMO_DIAG_SERPER.update({
+            "q": t,
+            "http": http,
+            "shopping": len(cru or []),
+            "erro": erro or "sem_resultados",
+            "serper_timeouts": _SERPER_HTTP_STATS["timeouts"],
+            "request_timeout": HTTP_TIMEOUT_SERPER_SHOPPING,
+        })
         return []
     candidatos = _jds_extrair_candidatos(t, cru, pais=pais, limite=40)
     resultado = _jds_comparar_mesmo_produto(t, candidatos, pais=pais)
@@ -7337,6 +7374,8 @@ def buscar_ofertas_jds_shopping(termo, usar_cache=True, limite=20, pais="BR"):
     pais = _normalizar_pais(pais)
     if not t:
         return []
+    _SERPER_HTTP_STATS["timeouts"] = 0
+    _SERPER_HTTP_STATS["errors"] = 0
     sem_cache = (os.environ.get("JDS_BUSCA_SEM_CACHE") or "").strip() == "1"
     if usar_cache and not sem_cache:
         cached = _ler_cache_garimpo(t, pais=pais)
@@ -7360,6 +7399,7 @@ def buscar_ofertas_jds_shopping(termo, usar_cache=True, limite=20, pais="BR"):
             "SEARCHAPI_SUCCESS": True,
             "fallback": False,
             "ofertas": len(ofertas),
+            "serper_timeouts": 0,
         })
         if usar_cache and not sem_cache:
             _gravar_cache_garimpo(t, ofertas, pais=pais)
@@ -7367,12 +7407,15 @@ def buscar_ofertas_jds_shopping(termo, usar_cache=True, limite=20, pais="BR"):
     fallback = buscar_ofertas_serper_shopping(
         t, usar_cache=False, limite=limite, pais=pais,
     )
+    sap = dict(sap or {})
+    sap["serper_timeouts"] = _SERPER_HTTP_STATS["timeouts"]
     _ULTIMO_DIAG_SERPER.update({
         "fonte": "serper_fallback",
         "searchapi": sap,
         status: True,
         "FALLBACK_SERPER": True,
         "fallback": True,
+        "serper_timeouts": _SERPER_HTTP_STATS["timeouts"],
     })
     print("[SearchApi] fallback=true")
     if fallback and usar_cache and not sem_cache:

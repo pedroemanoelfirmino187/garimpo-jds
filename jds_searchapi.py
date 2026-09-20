@@ -19,6 +19,9 @@ import garimpo_jds as jds
 
 API = "https://www.searchapi.io/api/v1/search"
 ACCOUNT_API = "https://www.searchapi.io/api/v1/me"
+# connect, read — 5 requests × 12s cabem no /garimpar sem prender 180s
+HTTP_TIMEOUT_SEARCHAPI = (3, 12)
+HTTP_TIMEOUT_SEARCHAPI_READ = 12
 
 _LOCK = threading.Lock()
 _MEM = {}
@@ -150,6 +153,8 @@ class _OrcamentoSearchApi:
         self.atingido = False
         self.engines = []
         self.puladas = []
+        self.timeouts = 0
+        self.erros = 0
 
     def restam(self):
         return max(0, self.limite - self.usado)
@@ -318,6 +323,24 @@ def _gravar_cache(chave, dados):
         pass
 
 
+def _bruto_timeout_ou_erro(exc):
+    nome = type(exc).__name__.lower()
+    msg = str(exc or "").lower()
+    if isinstance(
+        exc,
+        (
+            TimeoutError,
+            requests.Timeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ConnectTimeout,
+        ),
+    ):
+        return "timeout"
+    if "timeout" in nome or "timed out" in msg:
+        return "timeout"
+    return str(exc)[:180]
+
+
 def searchapi_request(params, http_get=None):
     """GET SearchApi. Uma tentativa. params nunca devem incluir a chave em logs."""
     http_get = http_get or _HTTP_GET
@@ -326,7 +349,7 @@ def searchapi_request(params, http_get=None):
             http, dados, bruto = http_get(dict(params))
             return int(http or 0), dados if isinstance(dados, dict) else None, bruto or ""
         except Exception as exc:
-            return 0, None, str(exc)[:180]
+            return 0, None, _bruto_timeout_ou_erro(exc)
     chave = _chave_searchapi()
     if not chave:
         return 0, None, "sem_chave"
@@ -336,7 +359,7 @@ def searchapi_request(params, http_get=None):
             API,
             params=envio,
             headers={"Authorization": f"Bearer {chave}", "Accept": "application/json"},
-            timeout=40,
+            timeout=HTTP_TIMEOUT_SEARCHAPI,
         )
         bruto = resp.text or ""
         try:
@@ -345,14 +368,22 @@ def searchapi_request(params, http_get=None):
             dados = None
         return resp.status_code, dados if isinstance(dados, dict) else None, bruto
     except Exception as exc:
-        return 0, None, str(exc)[:180]
+        return 0, None, _bruto_timeout_ou_erro(exc)
 
 
 def _pedir_searchapi(params, http_get=None, orcamento=None):
     engine = str((params or {}).get("engine") or "")
     if orcamento is not None and not orcamento.autorizar(engine):
         return 0, None, "orcamento"
-    return searchapi_request(params, http_get=http_get)
+    http, dados, bruto = searchapi_request(params, http_get=http_get)
+    if orcamento is not None:
+        if bruto == "timeout":
+            orcamento.timeouts += 1
+        elif http == 0 and bruto not in ("", "sem_chave"):
+            orcamento.erros += 1
+        elif http >= 400:
+            orcamento.erros += 1
+    return http, dados, bruto
 
 
 def consultar_uso_searchapi():
@@ -1055,10 +1086,28 @@ def buscar_ofertas_searchapi(
         return [], "SEARCHAPI_EMPTY"
 
     orcamento = _OrcamentoSearchApi()
+    fluxo = []
+
+    def _etapa(nome):
+        fluxo.append(nome)
+        print(f"[SearchApi] etapa={nome}")
+
+    def _obs():
+        return {
+            "request_timeout": HTTP_TIMEOUT_SEARCHAPI_READ,
+            "searchapi_timeouts": orcamento.timeouts,
+            "serper_timeouts": 0,
+            "searchapi_errors": orcamento.erros,
+            "searchapi_requests": orcamento.usado,
+            "searchapi_engines": list(orcamento.engines),
+            "etapas_fluxo": list(fluxo),
+        }
+
     chave_shop = "shop:" + chave_cache_searchapi(t, pais)
     cache_hit = False
     shopping = None
     http = 0
+    _etapa("shopping_start")
     if usar_cache:
         cached = _ler_cache(chave_shop, _ttl_shopping())
         if isinstance(cached, dict) and isinstance(cached.get("shopping_results"), list):
@@ -1068,14 +1117,18 @@ def buscar_ofertas_searchapi(
 
     if shopping is None:
         if not _chave_searchapi() and not callable(http_get or _HTTP_GET):
-            _diag(status="SEARCHAPI_ERROR", q=t, pais=pais, erro="sem_chave", cache_hit=False)
+            _etapa("shopping_done")
+            _etapa("final_result")
+            _diag(status="SEARCHAPI_ERROR", q=t, pais=pais, erro="sem_chave", cache_hit=False, **_obs())
             return [], "SEARCHAPI_ERROR"
         http, dados, bruto = _pedir_searchapi(
             {"engine": "google_shopping", "q": t, "gl": cfg["gl"], "hl": cfg["hl"]},
             http_get=http_get,
             orcamento=orcamento,
         )
-        if bruto == "orcamento" or http >= 400 or not isinstance(dados, dict):
+        if bruto == "orcamento" or bruto == "timeout" or http >= 400 or not isinstance(dados, dict):
+            _etapa("shopping_done")
+            _etapa("final_result")
             _diag(
                 status="SEARCHAPI_ERROR",
                 q=t,
@@ -1085,9 +1138,9 @@ def buscar_ofertas_searchapi(
                 cache_hit=False,
                 gl=cfg["gl"],
                 hl=cfg["hl"],
-                searchapi_requests=orcamento.usado,
                 searchapi_budget=orcamento.limite,
                 searchapi_budget_atingido=orcamento.atingido,
+                **_obs(),
             )
             return [], "SEARCHAPI_ERROR"
         shopping = dados.get("shopping_results") or []
@@ -1095,6 +1148,7 @@ def buscar_ofertas_searchapi(
             shopping = []
         if usar_cache:
             _gravar_cache(chave_shop, {"shopping_results": shopping})
+    _etapa("shopping_done")
 
     candidatos = []
     for bruto in shopping:
@@ -1190,7 +1244,7 @@ def buscar_ofertas_searchapi(
             if obruto == "orcamento":
                 return
             offers_req += 1
-            if oh >= 400 or not isinstance(odados, dict):
+            if obruto == "timeout" or oh >= 400 or not isinstance(odados, dict):
                 return
             payload = odados
             if usar_cache:
@@ -1209,8 +1263,10 @@ def buscar_ofertas_searchapi(
             itens.append(item)
 
     reserva_ciclo_page = 2 if reservar_page else 0
+    _etapa("po_start")
     for cand in po_fila:
         _consumir_po(cand, reserva_extra=reserva_ciclo_page)
+    _etapa("po_done")
 
     def _completar_po_originais():
         for cand in tokens[n_inicial:]:
@@ -1236,6 +1292,7 @@ def buscar_ofertas_searchapi(
                 if usar_cache:
                     payload_page = _ler_cache(chave_pp, _ttl_offers())
                 if not isinstance(payload_page, dict):
+                    _etapa("product_page_start")
                     ph, pdados, pbruto = _pedir_searchapi(
                         {
                             "engine": "google_product_page",
@@ -1246,11 +1303,12 @@ def buscar_ofertas_searchapi(
                         http_get=http_get,
                         orcamento=orcamento,
                     )
+                    _etapa("product_page_done")
                     if pbruto == "orcamento":
                         product_page_skipped = 1
                     else:
                         product_page_requests += 1
-                        if ph >= 400 or not isinstance(pdados, dict):
+                        if pbruto == "timeout" or ph >= 400 or not isinstance(pdados, dict):
                             product_page_failed = 1
                         else:
                             payload_page = pdados
@@ -1267,7 +1325,9 @@ def buscar_ofertas_searchapi(
                         if orcamento.restam() <= ebay_reserva and tok_rec not in tokens_vistos:
                             orcamento.puladas.append("google_product_offers")
                         else:
+                            _etapa("recovered_po_start")
                             _consumir_po(cand_rec, reserva_extra=0)
+                            _etapa("recovered_po_done")
                     elif product_page_failed == 0:
                         product_page_failed = 1
                 if product_page_recovered == 0:
@@ -1335,6 +1395,8 @@ def buscar_ofertas_searchapi(
 
     status = "SEARCHAPI_SUCCESS" if confirmados else "SEARCHAPI_EMPTY"
     shopping_requests = orcamento.engines.count("google_shopping")
+    _etapa("final_result")
+    obs = _obs()
     etapas = {
         "shopping_results": len(shopping),
         "candidates": len(candidatos),
@@ -1355,10 +1417,8 @@ def buscar_ofertas_searchapi(
         "ebay_search_results": ebay_search_results,
         "ebay_product_requests": ebay_product_requests,
         "ebay_search_skip": ebay_search_skip,
-        "searchapi_requests": orcamento.usado,
         "searchapi_budget": orcamento.limite,
         "searchapi_budget_atingido": orcamento.atingido,
-        "searchapi_engines": list(orcamento.engines),
         "searchapi_puladas": list(orcamento.puladas),
     }
     _diag(
@@ -1394,11 +1454,10 @@ def buscar_ofertas_searchapi(
         ebay_search_results=ebay_search_results,
         ebay_product_requests=ebay_product_requests,
         ebay_search_skip=ebay_search_skip,
-        searchapi_requests=orcamento.usado,
         searchapi_budget=orcamento.limite,
         searchapi_budget_atingido=orcamento.atingido,
-        searchapi_engines=list(orcamento.engines),
         searchapi_puladas=list(orcamento.puladas),
+        **obs,
     )
     print(
         "[SearchApi] "
@@ -1435,6 +1494,10 @@ def buscar_ofertas_searchapi(
         f"ebay_product_requests={ebay_product_requests} "
         f"ebay_search_skip={ebay_search_skip or '-'} "
         f"searchapi_requests={orcamento.usado}/{orcamento.limite} "
+        f"searchapi_timeouts={orcamento.timeouts} "
+        f"searchapi_errors={orcamento.erros} "
+        f"request_timeout={HTTP_TIMEOUT_SEARCHAPI_READ} "
+        f"etapas_fluxo={fluxo} "
         f"budget_atingido={str(orcamento.atingido).lower()} "
         f"fallback=false"
     )

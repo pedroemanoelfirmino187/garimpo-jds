@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -893,7 +894,11 @@ def test_7_timeout_uma_tentativa(cache_isolado):
     assert result == []
     assert visto == ["google_shopping"]
     diag = sap.ultimo_diag_searchapi()
-    assert "timed out" in str(diag.get("erro") or "")
+    assert diag.get("erro") == "timeout"
+    assert diag.get("searchapi_timeouts") == 1
+    assert diag.get("request_timeout") == sap.HTTP_TIMEOUT_SEARCHAPI_READ
+    assert "shopping_start" in (diag.get("etapas_fluxo") or [])
+    assert "final_result" in (diag.get("etapas_fluxo") or [])
 
 
 def test_8_product_token_duplicado_uma_po(cache_isolado):
@@ -1298,3 +1303,204 @@ def test_po_inicial_valido_nao_gasta_page(monkeypatch, cache_isolado):
     assert diag["product_page_requests"] == 0
     assert diag["product_page_skipped"] == 1
     assert diag["searchapi_requests"] <= 5
+
+
+def _assert_diag_timeout_seguro(diag):
+    blob = json.dumps(diag, default=str)
+    for secret in ("api_key", "Authorization", "Bearer "):
+        assert secret not in blob
+    assert diag.get("request_timeout") == sap.HTTP_TIMEOUT_SEARCHAPI_READ
+    assert "searchapi_timeouts" in diag
+    assert "serper_timeouts" in diag
+    assert "searchapi_errors" in diag
+    assert "searchapi_requests" in diag
+    assert "searchapi_engines" in diag
+
+
+def test_searchapi_resposta_normal_observabilidade(cache_isolado):
+    t0 = time.monotonic()
+
+    def http_get(params):
+        if params.get("engine") == "google_shopping":
+            return 200, {"shopping_results": []}, "{}"
+        raise AssertionError(params.get("engine"))
+
+    result, status = sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    assert time.monotonic() - t0 < 2.0
+    assert result == []
+    assert status == "SEARCHAPI_EMPTY"
+    diag = sap.ultimo_diag_searchapi()
+    _assert_diag_timeout_seguro(diag)
+    assert diag["searchapi_timeouts"] == 0
+    assert diag["searchapi_errors"] == 0
+    assert diag["searchapi_requests"] == 1
+    assert diag["searchapi_engines"] == ["google_shopping"]
+    fluxo = diag.get("etapas_fluxo") or []
+    assert fluxo[0] == "shopping_start"
+    assert "shopping_done" in fluxo
+    assert "po_start" in fluxo
+    assert "po_done" in fluxo
+    assert fluxo[-1] == "final_result"
+
+
+def test_searchapi_timeout_retorna_em_tempo_limitado(cache_isolado):
+    visto = []
+
+    def http_get(params):
+        visto.append(params.get("engine"))
+        raise TimeoutError("timed out")
+
+    t0 = time.monotonic()
+    result, status = sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0
+    assert status == "SEARCHAPI_ERROR"
+    assert result == []
+    assert visto == ["google_shopping"]
+    diag = sap.ultimo_diag_searchapi()
+    _assert_diag_timeout_seguro(diag)
+    assert diag["erro"] == "timeout"
+    assert diag["searchapi_timeouts"] == 1
+    assert "shopping_start" in (diag.get("etapas_fluxo") or [])
+    assert "shopping_done" in (diag.get("etapas_fluxo") or [])
+    assert "final_result" in (diag.get("etapas_fluxo") or [])
+
+
+def test_searchapi_request_http_real_usa_timeout_finito(monkeypatch):
+    visto = {}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        visto["timeout"] = timeout
+        visto["params"] = params
+        visto["headers"] = headers
+        raise sap.requests.Timeout("Read timed out")
+
+    monkeypatch.setattr(sap, "_chave_searchapi", lambda: "segredo-nao-logar")
+    monkeypatch.setattr(sap.requests, "get", fake_get)
+    t0 = time.monotonic()
+    http, dados, bruto = sap.searchapi_request({"engine": "google_shopping", "q": "iphone"})
+    assert time.monotonic() - t0 < 1.0
+    assert visto["timeout"] == sap.HTTP_TIMEOUT_SEARCHAPI
+    assert visto["timeout"] == (3, 12)
+    assert "api_key" not in (visto["params"] or {})
+    assert bruto == "timeout"
+    assert http == 0
+    assert dados is None
+    assert "segredo" not in bruto
+
+
+def test_product_offers_timeout_nao_prende(monkeypatch, cache_isolado):
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    monkeypatch.setenv("SEARCHAPI_MAX_PRODUCT_OFFERS", "5")
+    visto = []
+    shopping = [
+        _br_shop_row(position=1, product_token="tok-amz", seller="Amazon.com.br"),
+        _br_shop_row(position=2, product_token="tok-ml", seller="Mercado Livre"),
+        _br_shop_row(position=3, product_id="pid-sem-tok", seller="Shopee"),
+    ]
+
+    def http_get(params):
+        visto.append(params.get("engine"))
+        engine = params.get("engine")
+        if engine == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        if engine == "google_product_offers":
+            raise TimeoutError("timed out")
+        if engine == "google_product_page":
+            return 200, {"product": {"product_token": "tok-rec"}}, "{}"
+        raise AssertionError(engine)
+
+    t0 = time.monotonic()
+    result, status = sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    assert time.monotonic() - t0 < 2.0
+    assert status in {"SEARCHAPI_EMPTY", "SEARCHAPI_ERROR"}
+    assert result == []
+    assert visto[0] == "google_shopping"
+    assert "google_product_offers" in visto
+    diag = sap.ultimo_diag_searchapi()
+    _assert_diag_timeout_seguro(diag)
+    assert diag["searchapi_timeouts"] >= 1
+    assert "po_start" in (diag.get("etapas_fluxo") or [])
+    assert "po_done" in (diag.get("etapas_fluxo") or [])
+    assert "final_result" in (diag.get("etapas_fluxo") or [])
+    dump = json.dumps(diag, default=str)
+    assert "tok-amz" not in dump
+    assert "tok-rec" not in dump
+
+
+def test_product_page_timeout_nao_prende(monkeypatch, cache_isolado):
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    monkeypatch.setenv("SEARCHAPI_MAX_PRODUCT_OFFERS", "5")
+    visto = []
+    shopping = [
+        _br_shop_row(position=1, product_token="tok-amz", seller="Amazon.com.br"),
+        _br_shop_row(position=2, product_token="tok-ml", seller="Mercado Livre"),
+        _br_shop_row(position=3, product_id="pid-sem-tok", seller="Shopee"),
+    ]
+
+    def http_get(params):
+        visto.append(params.get("engine"))
+        engine = params.get("engine")
+        if engine == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        if engine == "google_product_offers":
+            return 200, {"offers": []}, "{}"
+        if engine == "google_product_page":
+            raise TimeoutError("timed out")
+        raise AssertionError(engine)
+
+    t0 = time.monotonic()
+    result, status = sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    assert time.monotonic() - t0 < 2.0
+    assert result == []
+    assert "google_product_page" in visto
+    diag = sap.ultimo_diag_searchapi()
+    _assert_diag_timeout_seguro(diag)
+    assert diag["searchapi_timeouts"] == 1
+    assert diag["product_page_failed"] == 1
+    fluxo = diag.get("etapas_fluxo") or []
+    assert "product_page_start" in fluxo
+    assert "product_page_done" in fluxo
+    assert "final_result" in fluxo
+    dump = json.dumps(diag, default=str)
+    assert "pid-sem-tok" not in dump
+
+
+def test_serper_timeout_nao_prende(monkeypatch):
+    assert jds.requests is not None
+    jds._SERPER_HTTP_STATS["timeouts"] = 0
+    jds._SERPER_HTTP_STATS["errors"] = 0
+    monkeypatch.setattr(jds, "_chave_serper", lambda: "segredo-serper")
+
+    def fake_post(*args, **kwargs):
+        assert kwargs.get("timeout") == jds.HTTP_TIMEOUT_SERPER_SHOPPING
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(jds.requests, "post", fake_post)
+    t0 = time.monotonic()
+    http, cru, loc, erro = jds._post_serper_shopping("iphone 15 128gb", pais="BR")
+    assert time.monotonic() - t0 < 1.0
+    assert http == 0
+    assert cru == []
+    assert erro == "timeout"
+    assert jds._SERPER_HTTP_STATS["timeouts"] == 1
+    assert "segredo" not in erro
+
+    def fake_post_path(*args, **kwargs):
+        assert kwargs.get("timeout") == jds.HTTP_TIMEOUT_SERPER_POST
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(jds.requests, "post", fake_post_path)
+    t0 = time.monotonic()
+    dados = jds._serper_post("/search", {"q": "x"})
+    assert time.monotonic() - t0 < 1.0
+    assert dados == {}
+    assert jds._SERPER_HTTP_STATS["timeouts"] == 2
