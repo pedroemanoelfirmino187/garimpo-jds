@@ -7624,12 +7624,16 @@ def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
     if capa and not (capa <= cap_a and capa <= cap_b):
         return False
 
-    for atributo in ("brands", "models", "platforms", "colors"):
+    for atributo in ("brands", "models", "platforms"):
         if fa[atributo] != fb[atributo]:
             return False
         requerido = fqa[atributo]
         if requerido and not requerido <= fa[atributo]:
             return False
+    if fa["colors"] and fb["colors"] and fa["colors"].isdisjoint(fb["colors"]):
+        return False
+    if fqa["colors"] and not fqa["colors"] <= fa["colors"]:
+        return False
 
     if fa["capacities"] != fb["capacities"]:
         return False

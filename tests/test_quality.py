@@ -68,8 +68,18 @@ def test_regras_da_consulta(query, candidate, expected):
     [
         ("Sony DualSense PS5 Branco", "Sony DualSense PS5", "controle ps5 sony"),
         ("Apple iPhone 15 128GB Preto", "Apple iPhone 15 128GB", "iphone 15"),
+    ],
+)
+def test_matcher_omite_cor_e_cor_explicita_sao_compativeis(a, b, query):
+    assert jds._jds_mesmo_produto(a, b, query) is True
+
+
+@pytest.mark.parametrize(
+    "a,b,query",
+    [
         ("Samsung Galaxy S24 256GB", "Samsung Galaxy S24 256GB 5G", "samsung galaxy s24"),
         ("Samsung Galaxy S24 256GB Preto", "Samsung Galaxy S24 256GB Branco", "samsung galaxy s24"),
+        ("Sony DualSense PS5 Branco", "Sony DualSense PS5 Preto", "controle ps5 sony"),
         ("Apple iPhone 15 128GB", "Apple iPhone 15 128GB Seminovo", "iphone 15"),
         ("Sony DualSense PS5", "Controle Genérico para PS5", "controle ps5"),
     ],
@@ -104,11 +114,17 @@ def test_agrupamento_so_retorna_anuncios_compativeis_par_a_par():
         oferta("Sony DualSense PS5 White", "shopee", "987654"),
     ]
     grupo = jds._jds_comparar_mesmo_produto("controle ps5 sony", ofertas)
-    assert {item["plataforma"] for item in grupo} == {"amazon", "shopee"}
+    assert {item["plataforma"] for item in grupo} == {"amazon", "mercado_livre", "shopee"}
     assert all(
         jds._jds_mesmo_produto(a["titulo"], b["titulo"], "controle ps5 sony")
         for indice, a in enumerate(grupo) for b in grupo[indice + 1:]
     )
+    cores_opostas = [
+        oferta("Sony DualSense PS5 Branco", "amazon", "B0CQKLS4RP"),
+        oferta("Sony DualSense PS5 Preto", "mercado_livre", "123456"),
+    ]
+    grupo_cor = jds._jds_comparar_mesmo_produto("controle ps5 sony", cores_opostas)
+    assert len({item["plataforma"] for item in grupo_cor}) == 1
 
 
 def test_card_nao_mistura_preco_imagem_titulo_url():

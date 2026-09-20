@@ -547,6 +547,141 @@ def offer_para_item(query, offer, pais="BR", motivos=None, amostras=None):
     return item
 
 
+def organic_ebay_para_offer(bruto):
+    """Converte organic_results do ebay_search no formato de offer_para_item.
+
+    Não inventa ITEM_ID. Exige PDP /itm/{id}. Se o JSON trouxer item_id
+    diferente da URL, descarta (não substitui o ID).
+    """
+    if not isinstance(bruto, dict):
+        return None
+    url = str(bruto.get("link") or bruto.get("url") or bruto.get("product_link") or "").strip()
+    if not jds._url_anuncio_exato(url, "ebay"):
+        return None
+    eid = jds._id_ebay(url)
+    if not eid:
+        return None
+    json_id = str(bruto.get("item_id") or bruto.get("itemId") or "").strip()
+    if json_id and json_id.isdigit() and json_id != eid:
+        return None
+    pdp = jds._pdp_ebay(eid)
+    if not pdp:
+        return None
+    titulo = str(bruto.get("title") or bruto.get("name") or "").strip()
+    if not titulo:
+        return None
+    preco = bruto.get("extracted_price")
+    vendedor = str(
+        bruto.get("seller") or bruto.get("store") or bruto.get("shop") or "eBay"
+    ).strip() or "eBay"
+    imagem = ""
+    for k in ("thumbnail", "image", "product_image"):
+        v = bruto.get(k)
+        if isinstance(v, str) and v.strip():
+            imagem = v.strip()
+            break
+    return {
+        "title": titulo,
+        "price": bruto.get("price") or preco,
+        "extracted_price": preco,
+        "link": pdp,
+        "merchant": {"name": vendedor},
+        "thumbnail": imagem,
+    }
+
+
+def _tem_ebay_confirmado(itens):
+    for p in itens or []:
+        if not isinstance(p, dict):
+            continue
+        if p.get("plataforma") != "ebay":
+            continue
+        orig = p.get("original_url") or p.get("url") or ""
+        if jds._id_ebay(orig) and jds._url_anuncio_exato(orig, "ebay"):
+            return True
+    return False
+
+
+def _organic_ebay_search(termo, pais="US", usar_cache=True, http_get=None):
+    chave = "ebay:" + chave_cache_searchapi(termo, pais)
+    if usar_cache:
+        cached = _ler_cache(chave, _ttl_shopping())
+        if isinstance(cached, dict) and isinstance(cached.get("organic_results"), list):
+            return cached.get("organic_results"), 0
+    http, dados, _bruto = searchapi_request(
+        {
+            "engine": "ebay_search",
+            "q": termo,
+            "ebay_domain": "ebay.com",
+            "country": "us",
+        },
+        http_get=http_get,
+    )
+    if http >= 400 or not isinstance(dados, dict):
+        return [], 1
+    organic = dados.get("organic_results") or []
+    if not isinstance(organic, list):
+        organic = []
+    if usar_cache:
+        _gravar_cache(chave, {"organic_results": organic})
+    return organic, 1
+
+
+def completar_ebay_via_search(
+    query,
+    pais="US",
+    usar_cache=True,
+    http_get=None,
+    baixar=None,
+    confirmar=True,
+    motivos=None,
+    amostras=None,
+):
+    """US: ebay_search → offer_para_item → matcher existente → confirmer → EPN."""
+    pais = jds._normalizar_pais(pais)
+    if pais != "US":
+        return [], 0, 0
+    organic, req = _organic_ebay_search(
+        query, pais=pais, usar_cache=usar_cache, http_get=http_get,
+    )
+    itens = []
+    rejeitadas = 0
+    for bruto in organic:
+        ofe = organic_ebay_para_offer(bruto)
+        if not ofe:
+            rejeitadas += 1
+            continue
+        item = offer_para_item(query, ofe, pais=pais, motivos=motivos, amostras=amostras)
+        if not item:
+            rejeitadas += 1
+            continue
+        itens.append(item)
+    grupo = jds._jds_comparar_mesmo_produto(query, itens, pais=pais)
+    if confirmar:
+        grupo = jds._jds_confirmar_listings(
+            grupo, pais=pais, baixar=baixar, motivos=motivos, amostras=amostras,
+        )
+    else:
+        grupo = jds._ordenar_entrega_menor_preco(
+            jds._carimbar_lista_afiliado(grupo, pais=pais)
+        )
+    confirmados = []
+    for p in grupo or []:
+        if p.get("plataforma") != "ebay":
+            continue
+        orig = p.get("original_url") or (p.get("listing_source") or {}).get("url")
+        if not jds._url_anuncio_exato(orig or "", "ebay"):
+            continue
+        if p.get("fonte") == "searchapi" and not validar_integridade_listing(
+            {**p, "original_url": orig}
+        ):
+            continue
+        p["original_url"] = orig or p.get("original_url")
+        p["affiliate_url"] = p.get("url") or p.get("link_afiliado")
+        confirmados.append(p)
+    return confirmados, req, len(organic)
+
+
 def _diag(**kwargs):
     _ULTIMO_DIAG.clear()
     _ULTIMO_DIAG.update(kwargs)
@@ -700,6 +835,29 @@ def buscar_ofertas_searchapi(
         p["affiliate_url"] = p.get("url") or p.get("link_afiliado")
         confirmados.append(p)
 
+    ebay_search_requests = 0
+    ebay_search_results = 0
+    ebay_search_skip = ""
+    if pais != "US":
+        ebay_search_skip = "nao_us"
+    elif _tem_ebay_confirmado(confirmados):
+        ebay_search_skip = "ebay_ja_confirmado"
+    else:
+        extra, ebay_search_requests, ebay_search_results = completar_ebay_via_search(
+            t,
+            pais=pais,
+            usar_cache=usar_cache,
+            http_get=http_get,
+            baixar=baixar,
+            confirmar=confirmar,
+            motivos=motivos,
+            amostras=amostras,
+        )
+        for p in extra:
+            if p.get("plataforma") == "ebay" and _tem_ebay_confirmado(confirmados):
+                continue
+            confirmados.append(p)
+
     status = "SEARCHAPI_SUCCESS" if confirmados else "SEARCHAPI_EMPTY"
     etapas = {
         "shopping_results": len(shopping),
@@ -709,6 +867,9 @@ def buscar_ofertas_searchapi(
         "apos_matcher": apos_matcher,
         "confirmer_entrada": confirmer_entrada,
         "offers_confirmed": len(confirmados),
+        "ebay_search_requests": ebay_search_requests,
+        "ebay_search_results": ebay_search_results,
+        "ebay_search_skip": ebay_search_skip,
     }
     _diag(
         status=status,
@@ -731,6 +892,9 @@ def buscar_ofertas_searchapi(
         cache_hit=cache_hit,
         fallback=False,
         http=http,
+        ebay_search_requests=ebay_search_requests,
+        ebay_search_results=ebay_search_results,
+        ebay_search_skip=ebay_search_skip,
     )
     print(
         "[SearchApi] "
@@ -747,6 +911,8 @@ def buscar_ofertas_searchapi(
         f"rejeicoes={ {k: v for k, v in motivos.items() if v} } "
         f"rejeicoes_ofertas={amostras[:11]} "
         f"cache_hit={str(cache_hit).lower()} "
+        f"ebay_search_requests={ebay_search_requests} "
+        f"ebay_search_skip={ebay_search_skip or '-'} "
         f"fallback=false"
     )
     return confirmados[:limite], status

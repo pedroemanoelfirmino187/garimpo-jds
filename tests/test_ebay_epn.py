@@ -342,3 +342,281 @@ def test_garimpar_assinatura_inalterada():
     assert "ofertas" in corpo
     assert "pais" in corpo
     assert "total" in corpo
+
+
+GOOGLE_SHOP = "https://www.google.com/search?ibp=oshop"
+
+
+def _shop(**kwargs):
+    card = {
+        "position": 1,
+        "product_token": "token-us-ebay",
+        "title": TITULO,
+        "seller": "eBay",
+        "price": "$74.99",
+        "extracted_price": 74.99,
+        "link": GOOGLE_SHOP,
+    }
+    card.update(kwargs)
+    if "product_token" in kwargs and kwargs["product_token"] in (None, ""):
+        card["product_token"] = kwargs["product_token"]
+    return card
+
+
+def _offers_ebay_itm():
+    return {"offers": [_offer()]}
+
+
+def _buscar_mock(shopping, offers_by_token=None, confirmar=True):
+    offers_by_token = offers_by_token or {}
+    visto = []
+
+    def http_get(params):
+        visto.append(dict(params))
+        engine = params.get("engine")
+        if engine == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        if engine == "google_product_offers":
+            tok = params.get("product_token")
+            return 200, offers_by_token.get(tok, {"offers": []}), "{}"
+        return 200, {}, "{}"
+
+    def baixar(url):
+        if "/itm/" in (url or "") and "rover.ebay" not in (url or ""):
+            return _html_ebay()
+        return ""
+
+    result, status = sap.buscar_ofertas_searchapi(
+        QUERY,
+        pais="US",
+        usar_cache=False,
+        http_get=http_get,
+        baixar=baixar,
+        confirmar=confirmar,
+    )
+    tokens_po = [
+        p.get("product_token")
+        for p in visto
+        if p.get("engine") == "google_product_offers"
+    ]
+    return result, status, visto, tokens_po, sap.ultimo_diag_searchapi()
+
+
+def test_shopping_ebay_com_token_reserva_e_chama_product_offers():
+    shopping = [
+        _shop(position=1, product_token="tok-amazon", seller="Amazon.com"),
+        _shop(position=2, product_token="tok-walmart", seller="Walmart"),
+        _shop(position=3, product_token="tok-target", seller="Target"),
+        _shop(position=4, product_token="tok-bestbuy", seller="Best Buy"),
+        _shop(position=5, product_token="token-us-ebay", seller="eBay"),
+    ]
+    escolhidos = sap.selecionar_candidatos_token(QUERY, shopping, pais="US", limite=3)
+    assert any(c.get("plataforma") == "ebay" and c.get("product_token") == "token-us-ebay" for c in escolhidos)
+    _result, _status, _visto, tokens_po, _diag = _buscar_mock(
+        shopping,
+        {"token-us-ebay": _offers_ebay_itm()},
+        confirmar=False,
+    )
+    assert "token-us-ebay" in tokens_po
+
+
+def test_shopping_ebay_sem_token_so_candidates():
+    shopping = [
+        _shop(position=1, product_token="tok-amazon", seller="Amazon.com"),
+        _shop(position=2, product_token=None, seller="eBay"),
+    ]
+    cands = [c for c in (sap.shopping_para_candidato(QUERY, b, "US") for b in shopping) if c]
+    ebay_cands = [c for c in cands if c.get("plataforma") == "ebay"]
+    assert ebay_cands, "eBay sem token ainda passa em shopping_para_candidato"
+    assert all(not c.get("product_token") for c in ebay_cands)
+    tokens = sap.selecionar_candidatos_token(QUERY, shopping, pais="US", limite=3)
+    assert all(c.get("plataforma") != "ebay" for c in tokens)
+    _result, _status, _visto, tokens_po, diag = _buscar_mock(shopping, confirmar=False)
+    assert diag.get("etapas", {}).get("candidates") == len(cands)
+    assert "token-us-ebay" not in tokens_po
+    assert all(t != "" and t is not None for t in tokens_po)
+
+
+def test_seller_ebay_link_google_token_itm_ate_confirmer():
+    shopping = [_shop()]
+    result, status, _visto, tokens_po, _diag = _buscar_mock(
+        shopping, {"token-us-ebay": _offers_ebay_itm()}, confirmar=True,
+    )
+    assert "token-us-ebay" in tokens_po
+    ebay = [p for p in result if p.get("plataforma") == "ebay"]
+    assert status == "SEARCHAPI_SUCCESS"
+    assert ebay
+    assert ebay[0]["original_url"] == PDP
+    assert jds._id_ebay(ebay[0]["original_url"]) == ITEM_ID
+    assert jds._id_ebay(ebay[0].get("affiliate_url") or "") == ITEM_ID
+
+
+def test_atalho_shopping_pdp_itm_sem_token_nao_chama_product_offers():
+    shopping = [_shop(product_token=None, link=PDP)]
+    result, status, _visto, tokens_po, diag = _buscar_mock(shopping, confirmar=True)
+    ebay = [p for p in result if p.get("plataforma") == "ebay"]
+    assert ebay
+    assert ebay[0]["original_url"] == PDP
+    assert jds._id_ebay(ebay[0]["original_url"]) == ITEM_ID
+    assert tokens_po == []
+    assert diag.get("product_offers_requests") == 0
+    assert status == "SEARCHAPI_SUCCESS"
+
+
+def test_atalho_shopping_pdp_itm_com_token_observa_product_offers():
+    shopping = [_shop(link=PDP, product_token="token-us-ebay")]
+    result, _status, _visto, tokens_po, diag = _buscar_mock(
+        shopping, {"token-us-ebay": _offers_ebay_itm()}, confirmar=True,
+    )
+    ebay = [p for p in result if p.get("plataforma") == "ebay"]
+    assert ebay
+    assert ebay[0]["original_url"] == PDP
+    assert jds._id_ebay(ebay[0]["original_url"]) == ITEM_ID
+    if tokens_po or (diag.get("product_offers_requests") or 0) > 0:
+        pytest.fail(
+            "TESTE REVELA POSSÍVEL PROBLEMA: shopping eBay já com PDP /itm/ "
+            "ainda dispara google_product_offers "
+            f"(tokens={tokens_po}, requests={diag.get('product_offers_requests')})"
+        )
+
+
+def test_product_offers_urls_nao_itm_rejeicao_esperada():
+    casos = [
+        (GOOGLE_SHOP, "url_google"),
+        ("https://www.ebay.com/sch/i.html?_nkw=dualsense", "url_busca"),
+        (jds._aplicar_afiliado_ebay(PDP), "url_nao_exata"),
+        ("https://ebay.us/GAuuZC", "url_nao_exata"),
+    ]
+    for link, motivo in casos:
+        motivos = sap._motivos_zerados()
+        assert sap.offer_para_item(QUERY, _offer(link=link), "US", motivos=motivos) is None
+        assert motivos[motivo] >= 1, (link, motivo, {k: v for k, v in motivos.items() if v})
+
+
+def test_product_offers_itm_passa_parser_original_e_confirmer():
+    motivos = sap._motivos_zerados()
+    item = sap.offer_para_item(QUERY, _offer(link=PDP), "US", motivos=motivos)
+    assert item is not None
+    assert item["original_url"] == PDP
+    assert "rover.ebay" not in item["original_url"]
+    ok = jds._jds_confirmar_listings([item], pais="US", baixar=lambda u: _html_ebay())
+    assert len(ok) == 1
+    assert ok[0]["original_url"] == PDP
+    assert jds._id_ebay(ok[0]["affiliate_url"]) == ITEM_ID
+
+
+def test_limite_3_ebay_com_plataforma_e_token_e_selecionado():
+    shopping = [
+        _shop(position=1, product_token="tok-amazon", seller="Amazon.com"),
+        _shop(position=2, product_token="tok-walmart", seller="Walmart"),
+        _shop(position=3, product_token="tok-target", seller="Target"),
+        _shop(position=4, product_token="token-us-ebay", seller="eBay"),
+    ]
+    escolhidos = sap.selecionar_candidatos_token(QUERY, shopping, pais="US", limite=3)
+    toks = {c["product_token"] for c in escolhidos}
+    plats = {c.get("plataforma") for c in escolhidos}
+    assert "token-us-ebay" in toks
+    assert "ebay" in plats
+    assert len(escolhidos) == 3
+
+
+def test_limite_3_sem_plataforma_ebay_nao_reserva():
+    shopping = [
+        _shop(position=1, product_token="tok-amazon", seller="Amazon.com"),
+        _shop(position=2, product_token="tok-walmart", seller="Walmart"),
+        _shop(position=3, product_token="tok-target", seller="Target"),
+        _shop(position=4, product_token="tok-mystery", seller="Games Mart LLC"),
+    ]
+    mystery = sap.shopping_para_candidato(QUERY, shopping[3], "US")
+    assert mystery is not None
+    assert mystery.get("plataforma") != "ebay"
+    escolhidos = sap.selecionar_candidatos_token(QUERY, shopping, pais="US", limite=3)
+    toks = {c["product_token"] for c in escolhidos}
+    plats = {c.get("plataforma") for c in escolhidos}
+    assert "ebay" not in plats
+    assert "tok-mystery" not in toks
+    assert toks == {"tok-amazon", "tok-walmart", "tok-target"}
+
+
+def test_limite_3_ebay_sem_token_nao_entra_nos_tokens():
+    shopping = [
+        _shop(position=1, product_token="tok-amazon", seller="Amazon.com"),
+        _shop(position=2, product_token="tok-walmart", seller="Walmart"),
+        _shop(position=3, product_token="tok-target", seller="Target"),
+        _shop(position=4, product_token=None, seller="eBay"),
+    ]
+    cand_ebay = sap.shopping_para_candidato(QUERY, shopping[3], "US")
+    assert cand_ebay is not None
+    assert cand_ebay.get("plataforma") == "ebay"
+    assert not cand_ebay.get("product_token")
+    escolhidos = sap.selecionar_candidatos_token(QUERY, shopping, pais="US", limite=3)
+    assert all(c.get("plataforma") != "ebay" for c in escolhidos)
+    assert {c["product_token"] for c in escolhidos} == {
+        "tok-amazon", "tok-walmart", "tok-target",
+    }
+
+
+def _item_loja(plat, link, seller, titulo=TITULO, preco=74.99, foto=FOTO):
+    return sap.offer_para_item(
+        QUERY,
+        {
+            "title": titulo,
+            "price": f"${preco}",
+            "extracted_price": preco,
+            "link": link,
+            "merchant": {"name": seller},
+            "thumbnail": foto,
+        },
+        "US",
+    )
+
+
+def test_matcher_titulo_ligeiramente_diferente_pode_eliminar_ebay():
+    amazon = _item_loja("amazon", "https://www.amazon.com/dp/B08H99BPJN", "Amazon.com")
+    walmart = _item_loja(
+        "walmart",
+        "https://www.walmart.com/ip/Sony-DualSense-Wireless-Controller/188140087",
+        "Walmart",
+        foto="https://i5.walmartimages.com/seo/dual.jpg",
+    )
+    ebay = _item_loja("ebay", PDP, "eBay", titulo=TITULO + " White")
+    assert amazon and walmart and ebay
+    xs = [amazon, walmart, ebay]
+    grupo = jds._jds_maior_grupo_identico(QUERY, xs)
+    plats = {p.get("plataforma") for p in grupo}
+    comparar = jds._jds_comparar_mesmo_produto(QUERY, xs, pais="US")
+    plats_cmp = {p.get("plataforma") for p in comparar}
+    assert "ebay" in plats
+    assert "ebay" in plats_cmp
+
+
+def test_matcher_dualsense_edge_nao_entra_no_grupo_dualsense():
+    titulo_edge = "Sony DualSense Edge Wireless Controller for PS5"
+    motivos = sap._motivos_zerados()
+    via_parser = sap.offer_para_item(
+        QUERY, _offer(title=titulo_edge), "US", motivos=motivos,
+    )
+    amazon = {
+        "titulo": TITULO,
+        "plataforma": "amazon",
+        "original_url": "https://www.amazon.com/dp/B08H99BPJN",
+        "url": "https://www.amazon.com/dp/B08H99BPJN",
+        "preco_num": 74.99,
+        "foto": FOTO,
+        "fonte": "searchapi",
+    }
+    ebay_edge = {
+        "titulo": titulo_edge,
+        "plataforma": "ebay",
+        "original_url": PDP,
+        "url": PDP,
+        "preco_num": 74.99,
+        "foto": FOTO,
+        "fonte": "searchapi",
+    }
+    grupo = jds._jds_maior_grupo_identico(QUERY, [amazon, ebay_edge])
+    plats = {p.get("plataforma") for p in grupo}
+    assert "ebay" not in plats
+    assert jds._jds_mesmo_produto(TITULO, titulo_edge, QUERY) is False
+    assert via_parser is None
+    assert motivos["matcher_rejeitou"] + motivos["titulo_rejeitado"] >= 1
