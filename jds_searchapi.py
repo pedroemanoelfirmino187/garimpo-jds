@@ -419,7 +419,7 @@ def shopping_para_candidato(query, bruto, pais="BR"):
         token = None
     if not jds._titulo_shopping_ok(query, titulo):
         return None
-    if not jds._jds_mesmo_produto(titulo, titulo, query):
+    if not jds._jds_anuncio_bate_consulta(query, titulo):
         return None
     seller = str(bruto.get("seller") or "").strip()
     link = str(bruto.get("link") or "").strip()
@@ -545,7 +545,7 @@ def offer_para_item(query, offer, pais="BR", motivos=None, amostras=None):
     if not jds._titulo_shopping_ok(query, titulo):
         _rejeitar(motivos, amostras, "titulo_rejeitado", ofe=offer)
         return None
-    if not jds._jds_mesmo_produto(titulo, titulo, query):
+    if not jds._jds_anuncio_bate_consulta(query, titulo):
         _rejeitar(motivos, amostras, "matcher_rejeitou", ofe=offer)
         return None
     preco = campos["extracted_price"]

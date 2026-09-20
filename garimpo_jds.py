@@ -7517,12 +7517,70 @@ def _jds_v4_same_product(query, a, b=None):
 
 # Chamadas do app são (titulo_ref, titulo_cand, consulta), não (consulta, a, b).
 _JDS_HARD_VARIANTS = {"slim", "lite", "pro", "ultra", "plus", "max", "edge", "fe", "mini", "air"}
+# Extra vs consulta. Sem pro/air/max (AirPods Pro, Air Max).
+_JDS_VARIANTES_CONSULTA = {"plus", "ultra", "fe", "edge", "lite", "mini"}
+_JDS_FAMILIA_SLIM = re.compile(r"\b(ideapad|thinkpad|yoga)\b")
+# DualSense Edge é SKU de PS5; o título pode omitir "PS5". Não generalizar.
+_JDS_DUALSENSE_EDGE_PLAT_CONFLITO = re.compile(
+    r"\b(?:xbox|ps4|playstation 4|windows|pc)\b"
+)
+
 
 def _jds_hard_norm(s):
-    n = _jds_v4_norm(s)
+    # Preserva S24+ como "s24 plus" antes do V4 remover pontuação.
+    bruto = re.sub(r"([A-Za-z0-9])\+", r"\1 plus ", str(s or ""))
+    n = _jds_v4_norm(bruto)
     # Normaliza capacidade para impedir 256 GB != 256GB.
     n = re.sub(r"(\d+(?:[.,]\d+)?)\s+(gb|tb|mb|mah|w|hz|ml|l|kg|g)\b", r"\1\2", n)
     return n
+
+
+def _jds_variante_extra_vs_consulta(va, v_ad, *textos):
+    extra = set(v_ad or ()) - set(va or ())
+    bloqueio = extra & _JDS_VARIANTES_CONSULTA
+    if "slim" in extra:
+        blob = " ".join(_jds_hard_norm(t) for t in textos if t)
+        if _JDS_FAMILIA_SLIM.search(blob):
+            bloqueio.add("slim")
+    return bloqueio
+
+
+def _jds_anuncio_bate_consulta(consulta, titulo):
+    """Valida um anúncio contra a intenção da consulta (não anúncio × anúncio)."""
+    return _jds_mesmo_produto(titulo, titulo, consulta)
+
+
+def _jds_tem_dualsense(texto):
+    return "dualsense" in _jds_hard_norm(texto).split()
+
+
+def _jds_dualsense_edge_implica_ps5(qa, va, vaa, vab, ra, rb, fqa):
+    """PS5 implícito só com DualSense Edge já casado nos dois lados."""
+    if "ps5" not in (fqa.get("platforms") or ()):
+        return False
+    q_toks = set((qa or "").split())
+    if "dualsense" not in q_toks:
+        return False
+    if "edge" not in (va or ()):
+        return False
+    if "edge" not in (vaa or ()) or "edge" not in (vab or ()):
+        return False
+    if not (va <= vaa and va <= vab):
+        return False
+    if not _jds_tem_dualsense(ra) or not _jds_tem_dualsense(rb):
+        return False
+    blob = " ".join(_jds_hard_norm(t) for t in (ra, rb) if t)
+    if _JDS_DUALSENSE_EDGE_PLAT_CONFLITO.search(blob):
+        return False
+    return True
+
+
+def _jds_consulta_v4_sem_exigir_ps5(consulta):
+    """Remove só o token de plataforma PS5 da consulta passada ao V4."""
+    texto = str(consulta or "")
+    texto = re.sub(r"\bplaystation\s*5\b", " ", texto, flags=re.I)
+    texto = re.sub(r"\bps5\b", " ", texto, flags=re.I)
+    return re.sub(r"\s+", " ", texto).strip()
 
 def _jds_hard_features(s):
     n = _jds_hard_norm(s)
@@ -7608,6 +7666,10 @@ def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
         return False
     if va and not (va <= vaa and va <= vab):
         return False
+    if _jds_variante_extra_vs_consulta(va, vaa, q, ra, rb) or _jds_variante_extra_vs_consulta(
+        va, vab, q, ra, rb,
+    ):
+        return False
     # DualSense sem Edge na consulta não pode virar DualSense Edge.
     q_toks = set(qa.split())
     if "dualsense" in q_toks and "edge" not in va:
@@ -7624,16 +7686,22 @@ def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
     if capa and not (capa <= cap_a and capa <= cap_b):
         return False
 
+    implica_ps5 = _jds_dualsense_edge_implica_ps5(qa, va, vaa, vab, ra, rb, fqa)
     for atributo in ("brands", "models", "platforms"):
         if fa[atributo] != fb[atributo]:
             return False
-        requerido = fqa[atributo]
+        requerido = set(fqa[atributo] or ())
+        if atributo == "platforms" and implica_ps5:
+            requerido.discard("ps5")
         if requerido and not requerido <= fa[atributo]:
             return False
     if fa["colors"] and fb["colors"] and fa["colors"].isdisjoint(fb["colors"]):
         return False
-    if fqa["colors"] and not fqa["colors"] <= fa["colors"]:
-        return False
+    if fqa["colors"]:
+        if not fqa["colors"] <= fa["colors"] or not fqa["colors"] <= fb["colors"]:
+            return False
+        if (fa["colors"] - fqa["colors"]) or (fb["colors"] - fqa["colors"]):
+            return False
 
     if fa["capacities"] != fb["capacities"]:
         return False
@@ -7646,7 +7714,8 @@ def _jds_mesmo_produto(ref_titulo, cand_titulo, consulta=""):
     if not (fa["brands"] or fa["models"] or am):
         return False
 
-    return _jds_v4_same_product(q, ra, rb)
+    q_v4 = _jds_consulta_v4_sem_exigir_ps5(q) if implica_ps5 else q
+    return _jds_v4_same_product(q_v4, ra, rb)
 
 
 def _jds_maior_grupo_identico(consulta, candidatos):
