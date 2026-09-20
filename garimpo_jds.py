@@ -266,6 +266,10 @@ _TEXTOS_APP = {
     "fechar": {"BR": "Fechar", "US": "Close"},
     "copiado": {"BR": "Copiado", "US": "Copied"},
     "nao_copiar": {"BR": "Não foi possível copiar agora", "US": "Couldn't copy right now"},
+    "siga_jds": {"BR": "Siga o JDS Economiza", "US": "Follow JDS Economiza"},
+    "rede_instagram": {"BR": "Instagram", "US": "Instagram"},
+    "rede_kwai": {"BR": "Kwai", "US": "Kwai"},
+    "rede_tiktok": {"BR": "TikTok", "US": "TikTok"},
     "de_por": {"BR": "De {a} por {b}", "US": "From {a} to {b}"},
     "premio_50": {"BR": "+50 pontos", "US": "+50 points"},
     "premio_cupom": {"BR": "Cupom JDS10", "US": "JDS10 coupon"},
@@ -4920,7 +4924,82 @@ def main(page):
         ),
     )
 
-    page.add(frase_sagrada, topo, abas)
+    async def abrir_url_externa(url):
+        try:
+            await page.launch_url(url)
+        except TypeError:
+            page.launch_url(url)
+
+    def botao_rede_social(nome, handle, url, cor, icone):
+        async def _abrir(_e, destino=url):
+            await abrir_url_externa(destino)
+
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Icon(icone, color=cor, size=20),
+                    ft.Text(nome, size=11, color="#EDEDED", weight=ft.FontWeight.W_600),
+                    ft.Text(handle, size=10, color="#888888"),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=2,
+            ),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            border_radius=10,
+            bgcolor="#1A1A1E",
+            on_click=_abrir,
+            tooltip=url,
+        )
+
+    rodape_redes = ft.Container(
+        content=ft.Column(
+            [
+                ft.Text(
+                    tx("siga_jds"),
+                    size=11,
+                    color="#888888",
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Row(
+                    [
+                        botao_rede_social(
+                            tx("rede_instagram"),
+                            "@jds_economiza7",
+                            "https://www.instagram.com/jds_economiza7/",
+                            "#E1306C",
+                            ft.Icons.CAMERA_ALT,
+                        ),
+                        botao_rede_social(
+                            tx("rede_kwai"),
+                            "@jdseconomiza",
+                            "https://www.kwai.com/@jdseconomiza",
+                            "#FF6B35",
+                            ft.Icons.VIDEOCAM,
+                        ),
+                        botao_rede_social(
+                            tx("rede_tiktok"),
+                            "@jds_economiza",
+                            "https://www.tiktok.com/@jds_economiza",
+                            "#00F5D4",
+                            ft.Icons.MUSIC_NOTE,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    wrap=True,
+                    spacing=10,
+                    run_spacing=8,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=6,
+            tight=True,
+        ),
+        width=float("inf"),
+        padding=ft.Padding.only(top=8, bottom=4),
+        border=ft.Border(top=ft.BorderSide(1, "#2A2A2E")),
+    )
+
+    page.add(frase_sagrada, topo, abas, rodape_redes)
     page.run_task(loop_alertas_desejos)
 
 
