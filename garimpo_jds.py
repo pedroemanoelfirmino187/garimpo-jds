@@ -1168,7 +1168,10 @@ def _oferta_foto_preco_do_mesmo_item(item):
 def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NOVO", pais="BR"):
     pais = _normalizar_pais(pais)
     url = _url_canonica_loja(url, plat, pais=pais)
-    if _url_anuncio_exato(url, plat) or (_eh_pagina_compra(url, plat) and "orderid_price" not in (url or "").lower() and "/s?" not in (url or "").lower() and "shopee.com.br/search" not in (url or "").lower()):
+    if plat == "ebay":
+        eid = _id_ebay(url)
+        url_final = _pdp_ebay(eid) if eid else ""
+    elif _url_anuncio_exato(url, plat) or (_eh_pagina_compra(url, plat) and "orderid_price" not in (url or "").lower() and "/s?" not in (url or "").lower() and "shopee.com.br/search" not in (url or "").lower()):
         url_final = _aplicar_afiliado_google(url, plat, pais=pais)
     elif str(url or "").startswith("http") and not _url_e_busca_loja(url):
         url_final = url
@@ -1178,13 +1181,11 @@ def _montar_item_oferta(titulo, preco_num, url, foto, plat, full=False, selo="NO
         url_final = _link_busca_amazon_us(titulo) if pais == "US" else _link_busca_amazon(titulo)
     elif plat == "mercado_livre":
         url_final = _link_busca_ml(titulo)
-    elif plat == "ebay":
-        eid = _id_ebay(url)
-        url_final = _aplicar_afiliado_ebay(_pdp_ebay(eid)) if eid else ""
     else:
         url_final = _aplicar_afiliado_google(url, plat, pais=pais)
-    foto_final = _foto_da_oferta(url_final, plat, foto) or _foto_da_oferta(url, plat, foto)
-    url_final = _aplicar_afiliado_google(url_final, plat, pais=pais)
+    foto_final = _foto_da_oferta(url if plat == "ebay" else url_final, plat, foto) or _foto_da_oferta(url, plat, foto)
+    if plat != "ebay":
+        url_final = _aplicar_afiliado_google(url_final, plat, pais=pais)
     item = {
         "titulo": titulo,
         "preco": _formatar_preco(preco_num, pais=pais),
@@ -6305,6 +6306,9 @@ def _jds_chave_anuncio_exato(url, plat):
             path = urllib.parse.urlparse(url).path.lower().rstrip("/")
             return f"shopee:{path}" if path else ""
         return ""
+    if plat == "ebay":
+        eid = _id_ebay(url)
+        return f"ebay:{eid}" if eid else ""
     return ""
 
 
@@ -6720,7 +6724,15 @@ def _jds_item_serper(termo, bruto, pais="BR", baixar=None, organic=None):
     item = _item_google(termo, titulo, preco, href, bloco.get("imageUrl"), plat, origem="serper", pais=pais)
     if not item:
         return None
-    if not _url_anuncio_exato(item.get("url") or "", plat) or _url_e_google(item.get("url") or ""):
+    url_item = item.get("url") or ""
+    if plat == "ebay":
+        pdp = _pdp_ebay(_id_ebay(item.get("original_url") or url_item or href))
+        if not pdp:
+            return None
+        item["original_url"] = pdp
+        item["url"] = pdp
+        url_item = pdp
+    if not _url_anuncio_exato(url_item, plat) or _url_e_google(url_item):
         return None
     foto_json = str(bloco.get("imageUrl") or "").strip()
     if foto_json.startswith("//"):

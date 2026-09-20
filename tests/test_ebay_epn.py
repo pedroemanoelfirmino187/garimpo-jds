@@ -236,6 +236,86 @@ def test_montar_item_ebay_nao_vira_busca():
     assert not item.get("url") or jds._id_ebay(item["url"])
 
 
+def test_montar_preserva_itm_ate_confirmer():
+    item = jds._montar_item_oferta(TITULO, 74.99, PDP, FOTO, "ebay", pais="US")
+    assert item["url"] == PDP
+    assert "rover.ebay" not in (item["url"] or "")
+    assert jds._url_anuncio_exato(item["url"], "ebay")
+
+
+def test_chave_anuncio_exato_ebay():
+    assert jds._jds_chave_anuncio_exato(PDP, "ebay") == f"ebay:{ITEM_ID}"
+    rover = jds._aplicar_afiliado_ebay(PDP)
+    assert jds._jds_chave_anuncio_exato(rover, "ebay") == ""
+    assert jds._jds_chave_anuncio_exato("https://www.ebay.com/sch/i.html?_nkw=x", "ebay") == ""
+
+
+def test_rover_sozinho_nao_e_pdp():
+    rover = jds._aplicar_afiliado_ebay(PDP)
+    assert jds._url_anuncio_exato(rover, "ebay") is False
+    motivos = sap._motivos_zerados()
+    assert sap.offer_para_item(QUERY, _offer(link=rover), "US", motivos=motivos) is None
+    assert motivos["url_nao_exata"] >= 1
+
+
+def test_ebay_us_encurtador_rejeitado():
+    motivos = sap._motivos_zerados()
+    ofe = _offer(link="https://ebay.us/GAuuZC")
+    assert sap.offer_para_item(QUERY, ofe, "US", motivos=motivos) is None
+    assert motivos["url_nao_exata"] + motivos["url_google"] >= 1
+    assert jds._id_ebay(ofe["link"]) == ""
+
+
+def test_serper_item_ebay_mantem_itm():
+    bruto = {
+        "title": TITULO,
+        "source": "eBay",
+        "price": "$74.99",
+        "extracted_price": 74.99,
+        "link": PDP,
+        "imageUrl": FOTO,
+    }
+    item = jds._jds_item_serper(QUERY, bruto, pais="US")
+    assert item is not None
+    assert item["original_url"] == PDP
+    assert item["url"] == PDP
+    assert "rover.ebay" not in item["url"]
+    html = _html_ebay()
+    ok = jds._jds_confirmar_listings([item], pais="US", baixar=lambda u: html)
+    assert len(ok) == 1
+    assert ok[0]["original_url"] == PDP
+    aff = ok[0]["affiliate_url"]
+    assert f"campid={jds.ID_EBAY_CAMPAIGN}" in aff
+    assert f"customid={jds.ID_EBAY_CUSTOM}" in aff
+    assert jds._id_ebay(aff) == ITEM_ID
+
+
+def test_searchapi_reserva_candidato_ebay_no_limite():
+    def card(pos, token, seller):
+        return {
+            "position": pos,
+            "product_token": token,
+            "title": TITULO,
+            "seller": seller,
+            "extracted_price": 74.99,
+            "link": "https://www.google.com/search?ibp=oshop",
+        }
+
+    shopping = [
+        card(1, "tok-amazon", "Amazon.com"),
+        card(2, "tok-walmart", "Walmart"),
+        card(3, "tok-target", "Target"),
+        card(4, "tok-bestbuy", "Best Buy"),
+        card(5, "tok-ebay", "eBay"),
+    ]
+    escolhidos = sap.selecionar_candidatos_token(QUERY, shopping, pais="US", limite=3)
+    assert len(escolhidos) == 3
+    assert any(c.get("plataforma") == "ebay" for c in escolhidos)
+    assert {c["product_token"] for c in escolhidos if c.get("plataforma") == "ebay"} == {"tok-ebay"}
+    br = sap.selecionar_candidatos_token(QUERY, shopping, pais="BR", limite=3)
+    assert all(c.get("plataforma") != "ebay" for c in br)
+
+
 def test_host_desconhecido_nao_vira_mercado_livre():
     assert jds._detectar_plataforma("https://www.exemplo.com/produto/1") == ""
     assert jds._detectar_plataforma("https://www.ebay.com/itm/123456789012") == "ebay"

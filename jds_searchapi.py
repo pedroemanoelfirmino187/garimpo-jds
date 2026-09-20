@@ -423,6 +423,24 @@ def selecionar_candidatos_token(query, shopping, pais="BR", limite=None):
     escolhidos = []
     vistos = set()
     plats = set()
+
+    def _encaixar(cand):
+        tok = cand.get("product_token")
+        if not tok or tok in vistos:
+            return False
+        plat = cand.get("plataforma")
+        escolhidos.append(cand)
+        vistos.add(tok)
+        if plat:
+            plats.add(plat)
+        return True
+
+    # US: reserva 1 vaga do limite atual para eBay válido, sem extra Product Offers.
+    if jds._normalizar_pais(pais) == "US" and limite >= 1:
+        for _score, cand in scored:
+            if cand.get("plataforma") == "ebay" and _encaixar(cand):
+                break
+
     for score, cand in scored:
         tok = cand["product_token"]
         if tok in vistos:
@@ -430,10 +448,7 @@ def selecionar_candidatos_token(query, shopping, pais="BR", limite=None):
         plat = cand.get("plataforma")
         if plat and plat in plats:
             continue
-        escolhidos.append(cand)
-        vistos.add(tok)
-        if plat:
-            plats.add(plat)
+        _encaixar(cand)
         if len(escolhidos) >= limite:
             return escolhidos
     for score, cand in scored:
