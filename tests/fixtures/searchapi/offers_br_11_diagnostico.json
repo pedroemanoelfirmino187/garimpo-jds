@@ -1,0 +1,94 @@
+{
+  "search_metadata": {"status": "Success"},
+  "offers": [
+    {
+      "position": 1,
+      "title": "Controle sem fio DualSense Sony PS5 Branco",
+      "price": "R$ 404,27",
+      "extracted_price": 404.27,
+      "link": "https://www.amazon.com.br/DualSense-Sony/dp/B0CQKLS4RP",
+      "merchant": {"name": "Amazon.com.br"},
+      "thumbnail": "https://m.media-amazon.com/images/I/dualsense-white.jpg"
+    },
+    {
+      "position": 2,
+      "title": "Sony DualSense PS5",
+      "price": "R$ 399,00",
+      "extracted_price": 399,
+      "link": "https://www.google.com/search?ibp=oshop&q=controle+ps5+sony",
+      "merchant": {"name": "Amazon.com.br"}
+    },
+    {
+      "position": 3,
+      "title": "Sony DualSense PS5",
+      "price": "R$ 389,00",
+      "extracted_price": 389,
+      "link": "https://www.amazon.com.br/s?k=dualsense+sony",
+      "merchant": {"name": "Amazon.com.br"}
+    },
+    {
+      "position": 4,
+      "title": "Controle DualSense Sony PS5",
+      "price": "R$ 379,00",
+      "extracted_price": 379,
+      "link": "https://www.magazineluiza.com.br/controle-ps5/p/abc123",
+      "merchant": {"name": "Magazine Luiza"}
+    },
+    {
+      "position": 5,
+      "title": "Sony DualSense PS5 Branco",
+      "price": "R$ 410,00",
+      "extracted_price": 410,
+      "link": "https://www.casasbahia.com.br/controle/123",
+      "merchant": {"name": "Casas Bahia"}
+    },
+    {
+      "position": 6,
+      "title": "Sony DualSense PS5",
+      "price": "R$ 400,00",
+      "extracted_price": 400,
+      "link": "https://www.americanas.com.br/produto/123",
+      "merchant": {"name": "Americanas"}
+    },
+    {
+      "position": 7,
+      "title": "Controle Compatível com PS5 sem fio",
+      "price": "R$ 89,90",
+      "extracted_price": 89.9,
+      "link": "https://shopee.com.br/Controle-PS5-i.1608031728.2309811123",
+      "merchant": {"name": "Shopee"}
+    },
+    {
+      "position": 8,
+      "title": "Sony DualSense PS5 seminovo",
+      "price": "R$ 350,00",
+      "extracted_price": 350,
+      "link": "https://www.amazon.com.br/dp/B0CQKLS4RP",
+      "merchant": {"name": "Amazon.com.br"}
+    },
+    {
+      "position": 9,
+      "title": "Sony DualSense PS5",
+      "price": "R$ 420,00",
+      "extracted_price": 420,
+      "link": "https://www.kabum.com.br/produto/123456",
+      "merchant": {"name": "KaBuM"}
+    },
+    {
+      "position": 10,
+      "title": "Sony DualSense PS5",
+      "price": "R$ 395,00",
+      "extracted_price": 395,
+      "link": "https://www.google.com/shopping?q=dualsense",
+      "merchant": {"name": "Google"}
+    },
+    {
+      "position": 11,
+      "title": "Controle PS5 genérico",
+      "price": "R$ 99,00",
+      "extracted_price": 99,
+      "link": "https://lista.mercadolivre.com.br/controle-ps5-sony",
+      "merchant": {"name": "Mercado Livre"}
+    }
+  ]
+}

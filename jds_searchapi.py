@@ -26,6 +26,78 @@ _ULTIMO_DIAG = {}
 _HTTP_GET = None  # testes: (params) -> (http, dict|None, bruto)
 
 
+MOTIVOS_REJEICAO = (
+    "url_google",
+    "url_busca",
+    "loja_fora",
+    "url_nao_exata",
+    "titulo_rejeitado",
+    "matcher_rejeitou",
+    "modelo_divergente",
+    "variante_divergente",
+    "condicao_divergente",
+    "html_vazio",
+    "pagina_bloqueada",
+    "pagina_inutil",
+    "id_nao_encontrado",
+    "variante_nao_bate",
+    "condicao_nao_bate",
+    "preco_nao_encontrado",
+    "preco_nao_confere",
+    "preco_divergente",
+    "confirmer_rejeitou",
+)
+
+
+def _motivos_zerados():
+    return {k: 0 for k in MOTIVOS_REJEICAO}
+
+
+def _inc(motivos, chave):
+    if motivos is None:
+        return
+    if chave not in motivos:
+        motivos[chave] = 0
+    motivos[chave] += 1
+
+
+def _amostra_rejeicao(ofe=None, item=None, motivo=""):
+    ofe = ofe if isinstance(ofe, dict) else {}
+    item = item if isinstance(item, dict) else {}
+    merchant = ofe.get("merchant") if isinstance(ofe.get("merchant"), dict) else {}
+    loja = (
+        item.get("vendedor_oferta")
+        or item.get("loja")
+        or merchant.get("name")
+        or ofe.get("seller")
+        or ""
+    )
+    titulo = item.get("titulo") or ofe.get("title") or ""
+    preco = item.get("preco_num")
+    if preco in (None, ""):
+        preco = ofe.get("extracted_price") or ofe.get("price") or item.get("preco") or ""
+    original = (
+        item.get("original_url")
+        or ofe.get("link")
+        or item.get("url")
+        or ""
+    )
+    return {
+        "loja": str(loja)[:80],
+        "titulo": str(titulo)[:140],
+        "preco": preco,
+        "original_url": str(original)[:200],
+        "motivo": motivo,
+    }
+
+
+def _rejeitar(motivos, amostras, motivo, ofe=None, item=None):
+    _inc(motivos, motivo)
+    if amostras is None:
+        return
+    amostras.append(_amostra_rejeicao(ofe=ofe, item=item, motivo=motivo))
+
+
 def ultimo_diag_searchapi():
     return dict(_ULTIMO_DIAG)
 
@@ -374,27 +446,41 @@ def selecionar_candidatos_token(query, shopping, pais="BR", limite=None):
     return escolhidos
 
 
-def offer_para_item(query, offer, pais="BR"):
+def offer_para_item(query, offer, pais="BR", motivos=None, amostras=None):
     campos = campos_mesma_oferta(offer)
     if not campos:
+        _rejeitar(motivos, amostras, "titulo_rejeitado", ofe=offer)
         return None
     titulo = campos["titulo"]
     link = campos["url"]
     vendedor = campos["vendedor"]
-    if not titulo or not link:
+    if not titulo:
+        _rejeitar(motivos, amostras, "titulo_rejeitado", ofe=offer)
         return None
-    if jds._url_e_google(link) or jds._url_e_busca_loja(link):
+    if not link:
+        _rejeitar(motivos, amostras, "url_nao_exata", ofe=offer)
+        return None
+    if jds._url_e_google(link):
+        _rejeitar(motivos, amostras, "url_google", ofe=offer)
+        return None
+    if jds._url_e_busca_loja(link):
+        _rejeitar(motivos, amostras, "url_busca", ofe=offer)
         return None
     plat = _plat_de_oferta(vendedor, link, pais=pais)
     if plat not in jds._lojas_do_pais(pais):
+        _rejeitar(motivos, amostras, "loja_fora", ofe=offer)
         return None
     if not jds._url_anuncio_exato(link, plat):
+        _rejeitar(motivos, amostras, "url_nao_exata", ofe=offer)
         return None
     if pais == "US" and plat == "amazon" and not jds._host_amazon_eua(link):
+        _rejeitar(motivos, amostras, "url_nao_exata", ofe=offer)
         return None
     if not jds._titulo_shopping_ok(query, titulo):
+        _rejeitar(motivos, amostras, "titulo_rejeitado", ofe=offer)
         return None
     if not jds._jds_mesmo_produto(titulo, titulo, query):
+        _rejeitar(motivos, amostras, "matcher_rejeitou", ofe=offer)
         return None
     preco = campos["extracted_price"]
     try:
@@ -402,19 +488,25 @@ def offer_para_item(query, offer, pais="BR"):
     except (TypeError, ValueError):
         preco_n = jds._preco_para_numero(campos["preco_txt"], pais=pais)
     if preco_n <= 0:
+        _rejeitar(motivos, amostras, "preco_nao_encontrado", ofe=offer)
         return None
     foto = campos["imagem"]
     item = jds._item_google(
         query, titulo, preco_n, link, foto, plat, origem="searchapi", pais=pais,
     )
     if not item:
+        _rejeitar(motivos, amostras, "titulo_rejeitado", ofe=offer)
         return None
     original = jds._url_canonica_loja(link, plat, pais=pais)
+    if jds._url_e_google(original) or jds._url_e_busca_loja(original) or not jds._url_anuncio_exato(original, plat):
+        _rejeitar(motivos, amostras, "url_nao_exata", ofe=offer)
+        return None
     item["original_url"] = original
     item["pais"] = pais
     item["preco"] = jds._formatar_preco(preco_n, pais=pais)
     item["preco_num"] = preco_n
     item["vendedor_oferta"] = vendedor
+    item["loja"] = item.get("loja") or jds._nome_loja(plat)
     item["fonte"] = "searchapi"
     item["listing_source"] = {
         "titulo": titulo,
@@ -426,7 +518,9 @@ def offer_para_item(query, offer, pais="BR"):
     }
     if foto:
         item["foto"] = foto
+        item["imagem"] = foto
     if not validar_integridade_listing(item):
+        _rejeitar(motivos, amostras, "url_nao_exata", ofe=offer, item=item)
         return None
     return item
 
@@ -500,6 +594,8 @@ def buscar_ofertas_searchapi(
     offers_recv = 0
     rejeitadas = 0
     itens = []
+    motivos = _motivos_zerados()
+    amostras = []
 
     # Shopping já com PDP na mesma linha (title+price+seller+link) economiza Product Offers.
     for cand in candidatos:
@@ -515,7 +611,7 @@ def buscar_ofertas_searchapi(
             "merchant": {"name": cand.get("seller") or plat},
             "thumbnail": cand.get("imagem") or "",
         }
-        item = offer_para_item(t, fake_offer, pais=pais)
+        item = offer_para_item(t, fake_offer, pais=pais, motivos=motivos, amostras=amostras)
         if item:
             itens.append(item)
 
@@ -552,31 +648,46 @@ def buscar_ofertas_searchapi(
             continue
         offers_recv += len(offers)
         for ofe in offers:
-            item = offer_para_item(t, ofe, pais=pais)
+            item = offer_para_item(t, ofe, pais=pais, motivos=motivos, amostras=amostras)
             if not item:
                 rejeitadas += 1
                 continue
             itens.append(item)
 
+    apos_parser = len(itens)
     grupo = jds._jds_comparar_mesmo_produto(t, itens, pais=pais)
+    apos_matcher = len(grupo or [])
+    confirmer_entrada = apos_matcher if confirmar else 0
     if confirmar:
-        grupo = jds._jds_confirmar_listings(grupo, pais=pais, baixar=baixar)
+        grupo = jds._jds_confirmar_listings(
+            grupo, pais=pais, baixar=baixar, motivos=motivos, amostras=amostras,
+        )
     else:
         grupo = jds._ordenar_entrega_menor_preco(
             jds._carimbar_lista_afiliado(grupo, pais=pais)
         )
     grupo = [p for p in (grupo or []) if validar_integridade_listing(p) or p.get("fonte") != "searchapi"]
-    # Confirmer / afiliado pode reescrever url; original_url permanece a da oferta.
     confirmados = []
     for p in grupo or []:
+        orig = p.get("original_url") or (p.get("listing_source") or {}).get("url")
         if p.get("fonte") == "searchapi" and not validar_integridade_listing(
-            {**p, "original_url": p.get("original_url") or p.get("listing_source", {}).get("url")}
+            {**p, "original_url": orig}
         ):
             continue
+        p["original_url"] = orig or p.get("original_url")
         p["affiliate_url"] = p.get("url") or p.get("link_afiliado")
         confirmados.append(p)
 
     status = "SEARCHAPI_SUCCESS" if confirmados else "SEARCHAPI_EMPTY"
+    etapas = {
+        "shopping_results": len(shopping),
+        "candidates": len(candidatos),
+        "offers_received": offers_recv,
+        "apos_parser": apos_parser,
+        "apos_matcher": apos_matcher,
+        "confirmer_entrada": confirmer_entrada,
+        "offers_confirmed": len(confirmados),
+    }
     _diag(
         status=status,
         q=t,
@@ -592,6 +703,9 @@ def buscar_ofertas_searchapi(
         offers_received=offers_recv,
         offers_rejected=rejeitadas,
         offers_confirmed=len(confirmados),
+        etapas=etapas,
+        rejeicoes={k: v for k, v in motivos.items() if v},
+        rejeicoes_ofertas=amostras[:20],
         cache_hit=cache_hit,
         fallback=False,
         http=http,
@@ -603,8 +717,13 @@ def buscar_ofertas_searchapi(
         f"candidates={len(candidatos)} "
         f"product_offers_requests={offers_req} "
         f"offers_received={offers_recv} "
+        f"apos_parser={apos_parser} "
+        f"apos_matcher={apos_matcher} "
+        f"confirmer_entrada={confirmer_entrada} "
         f"offers_rejected={rejeitadas} "
         f"offers_confirmed={len(confirmados)} "
+        f"rejeicoes={ {k: v for k, v in motivos.items() if v} } "
+        f"rejeicoes_ofertas={amostras[:11]} "
         f"cache_hit={str(cache_hit).lower()} "
         f"fallback=false"
     )

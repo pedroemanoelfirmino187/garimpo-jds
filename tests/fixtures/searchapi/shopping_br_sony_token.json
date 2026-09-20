@@ -1,0 +1,15 @@
+{
+  "search_metadata": {"status": "Success"},
+  "search_parameters": {"engine": "google_shopping", "q": "controle ps5 sony", "gl": "br", "hl": "pt"},
+  "shopping_results": [
+    {
+      "position": 1,
+      "product_token": "token-ps5-sony-11",
+      "title": "Controle sem fio DualSense Sony PS5 Branco",
+      "seller": "Amazon.com.br",
+      "price": "R$ 404,27",
+      "extracted_price": 404.27,
+      "link": "https://www.google.com/search?ibp=oshop"
+    }
+  ]
+}

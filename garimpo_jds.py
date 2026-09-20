@@ -6831,50 +6831,139 @@ def _jds_html_anuncio(url):
     return corpo or ""
 
 
-def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None):
-    """Só mantém a oferta se a página da MESMA URL confirmar título/variante/condição/preço.
+def _url_pdp_para_confirmar(item):
+    """PDP sem tracking para baixar a página. Afiliado só depois da confirmação."""
+    if not isinstance(item, dict):
+        return ""
+    plat = item.get("plataforma") or _plataforma_loja(
+        item.get("original_url") or item.get("url") or item.get("link") or ""
+    )
+    candidatos = (
+        (item.get("original_url") or "").strip(),
+        (item.get("url") or "").strip(),
+        (item.get("link") or "").strip(),
+    )
+    for url in candidatos:
+        if not url:
+            continue
+        if _url_e_google(url) or _url_e_busca_loja(url):
+            continue
+        if _url_anuncio_exato(url, plat):
+            return url
+    return ""
+
+
+def _inc_motivo_confirmer(motivos, chave):
+    if motivos is None:
+        return
+    motivos[chave] = int(motivos.get(chave) or 0) + 1
+
+
+def _anotar_rejeicao_confirmer(motivos, amostras, motivo, item):
+    _inc_motivo_confirmer(motivos, motivo)
+    _inc_motivo_confirmer(motivos, "confirmer_rejeitou")
+    aliases = {
+        "variante_nao_bate": "variante_divergente",
+        "condicao_nao_bate": "condicao_divergente",
+        "preco_nao_confere": "preco_divergente",
+        "matcher_rejeitou": "modelo_divergente",
+    }
+    if motivo in aliases:
+        _inc_motivo_confirmer(motivos, aliases[motivo])
+    if amostras is None:
+        return
+    item = item if isinstance(item, dict) else {}
+    amostras.append({
+        "loja": str(item.get("vendedor_oferta") or item.get("loja") or "")[:80],
+        "titulo": str(item.get("titulo") or "")[:140],
+        "preco": item.get("preco_num") or item.get("preco") or "",
+        "original_url": str(item.get("original_url") or item.get("url") or "")[:200],
+        "motivo": motivo,
+    })
+
+
+def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None, motivos=None, amostras=None):
+    """Só mantém a oferta se a PDP original confirmar título/variante/condição/preço.
 
     Sem página útil: descarta. Não troca a URL por busca, catálogo ou outro anúncio.
     """
     if not isinstance(item, dict):
+        _anotar_rejeicao_confirmer(motivos, amostras, "url_nao_exata", item or {})
         return None
-    url = (item.get("url") or item.get("link") or "").strip()
-    plat = item.get("plataforma") or _plataforma_loja(url)
+    pdp = _url_pdp_para_confirmar(item)
+    plat = item.get("plataforma") or _plataforma_loja(pdp)
     pais = _normalizar_pais(item.get("pais") or "BR")
     titulo = item.get("titulo") or ""
+    foto = item.get("foto") or item.get("imagem") or ""
     try:
         preco = float(item.get("preco_num") or item.get("preco_numerico") or 0)
     except (TypeError, ValueError):
         preco = 0.0
-    if not _url_anuncio_exato(url, plat) or preco <= 0 or not titulo:
+    if not pdp or not _url_anuncio_exato(pdp, plat) or _url_e_google(pdp) or _url_e_busca_loja(pdp):
+        _anotar_rejeicao_confirmer(motivos, amostras, "url_nao_exata", item)
+        return None
+    if preco <= 0:
+        _anotar_rejeicao_confirmer(motivos, amostras, "preco_nao_encontrado", item)
+        return None
+    if not titulo:
+        _anotar_rejeicao_confirmer(motivos, amostras, "titulo_rejeitado", item)
         return None
     if html is None:
         fn = baixar or _jds_html_anuncio
-        html = fn(url) if callable(fn) else ""
-    if not html or _pagina_bloqueada(html) or not _resposta_util_loja(url, html):
+        html = fn(pdp) if callable(fn) else ""
+    if not html:
+        _anotar_rejeicao_confirmer(motivos, amostras, "html_vazio", item)
+        return None
+    if _pagina_bloqueada(html):
+        _anotar_rejeicao_confirmer(motivos, amostras, "pagina_bloqueada", item)
+        return None
+    if not _resposta_util_loja(pdp, html):
+        _anotar_rejeicao_confirmer(motivos, amostras, "pagina_inutil", item)
         return None
     titulo_pagina = _jds_titulo_html_anuncio(html)
     if not titulo_pagina:
+        _anotar_rejeicao_confirmer(motivos, amostras, "pagina_inutil", item)
         return None
-    if not _jds_id_anuncio_na_pagina(url, plat, html):
+    if not _jds_id_anuncio_na_pagina(pdp, plat, html):
+        _anotar_rejeicao_confirmer(motivos, amostras, "id_nao_encontrado", item)
+        return None
+    cap_c = _jds_armazenamento_gb(titulo)
+    cap_p = _jds_armazenamento_gb(titulo_pagina)
+    if cap_c and cap_p and cap_c.isdisjoint(cap_p):
+        _anotar_rejeicao_confirmer(motivos, amostras, "variante_nao_bate", item)
+        return None
+    if _jds_texto_condicao(titulo) != _jds_texto_condicao(titulo_pagina):
+        _anotar_rejeicao_confirmer(motivos, amostras, "condicao_nao_bate", item)
         return None
     if not _jds_variante_bate(titulo, titulo_pagina):
+        _anotar_rejeicao_confirmer(motivos, amostras, "variante_nao_bate", item)
         return None
     precos_pagina = _jds_precos_html_anuncio(html, pais=pais)
+    if not precos_pagina:
+        _anotar_rejeicao_confirmer(motivos, amostras, "preco_nao_encontrado", item)
+        return None
     if not _jds_preco_bate_com_pagina(preco, precos_pagina):
+        _anotar_rejeicao_confirmer(motivos, amostras, "preco_nao_confere", item)
         return None
     if not _jds_mesmo_produto(titulo, titulo_pagina, titulo) and not _jds_v4_same_product(titulo, titulo, titulo_pagina):
-        # ASIN/MLB já bateu: ainda exige sobreposição mínima de modelo (não mistura outro produto no /dp/).
         tok_c = set(re.findall(r"[a-z0-9]{4,}", _sem_acento(titulo)))
         tok_p = set(re.findall(r"[a-z0-9]{4,}", _sem_acento(titulo_pagina)))
         if len(tok_c & tok_p) < 1:
+            _anotar_rejeicao_confirmer(motivos, amostras, "matcher_rejeitou", item)
             return None
     item = dict(item)
     item["confirmada_pagina"] = True
+    item["original_url"] = pdp
+    item["titulo"] = titulo
+    item["preco_num"] = preco
+    item["preco"] = _formatar_preco(preco, pais=pais)
+    if foto:
+        item["foto"] = foto
+        item["imagem"] = foto
     return item
 
 
-def _jds_confirmar_listings(ofertas, pais="BR", baixar=None):
+def _jds_confirmar_listings(ofertas, pais="BR", baixar=None, motivos=None, amostras=None):
     pais = _normalizar_pais(pais)
     saida = []
     vistos = set()
@@ -6886,7 +6975,9 @@ def _jds_confirmar_listings(ofertas, pais="BR", baixar=None):
             ok["confirmada_pagina"] = False
             saida.append(ok)
             continue
-        ok = _jds_confirmar_oferta_na_pagina(item, baixar=baixar)
+        ok = _jds_confirmar_oferta_na_pagina(
+            item, baixar=baixar, motivos=motivos, amostras=amostras,
+        )
         if not ok:
             continue
         plat = ok.get("plataforma")
@@ -6897,7 +6988,13 @@ def _jds_confirmar_listings(ofertas, pais="BR", baixar=None):
             continue
         vistos.add(plat)
         saida.append(ok)
-    return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(saida, pais=pais))
+    carimbada = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(saida, pais=pais))
+    for p in carimbada:
+        orig = (p.get("original_url") or "").strip()
+        if orig:
+            p["original_url"] = orig
+        p["affiliate_url"] = p.get("url") or p.get("link_afiliado")
+    return carimbada
 
 
 def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR"):
@@ -6905,7 +7002,10 @@ def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR"):
     xs = [
         p for p in (candidatos or [])
         if isinstance(p, dict)
-        and _url_anuncio_exato(p.get("url") or "", p.get("plataforma"))
+        and _url_anuncio_exato(
+            (p.get("original_url") or p.get("url") or ""),
+            p.get("plataforma"),
+        )
         and _oferta_foto_preco_do_mesmo_item(p)
         and _titulo_shopping_ok(consulta, p.get("titulo") or "")
         and (p.get("fonte") or "") not in {"catalogo", "busca_loja"}

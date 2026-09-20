@@ -301,3 +301,177 @@ def test_garimpar_pais_us_assinatura():
     assert resp.status_code == 200
     assert resp.json()["pais"] == "US"
     assert resp.json()["total"] == 1
+
+
+def _item_amazon_searchapi():
+    ofe = _load("offers_br_amazon.json")["offers"][0]
+    item = sap.offer_para_item("controle ps5 sony", ofe, "BR")
+    assert item is not None
+    item["url"] = item["original_url"] + "?tag=jdseconomiz0e-20"
+    return item
+
+
+def test_pdp_valida_confirma_uma():
+    item = _item_amazon_searchapi()
+    titulo, preco, orig = item["titulo"], item["preco_num"], item["original_url"]
+    foto = item.get("foto")
+    html = _html(titulo, "R$ 404,27", "B0CQKLS4RP")
+    ok = jds._jds_confirmar_listings([item], pais="BR", baixar=lambda u: html)
+    assert len(ok) == 1
+    assert ok[0]["preco_num"] == pytest.approx(preco)
+    assert ok[0]["titulo"] == titulo
+    assert ok[0]["original_url"] == orig
+    assert "tag=" in (ok[0].get("affiliate_url") or ok[0].get("url") or "")
+    if foto:
+        assert ok[0].get("foto") == foto
+
+
+def test_html_vazio_rejeita():
+    item = _item_amazon_searchapi()
+    motivos = sap._motivos_zerados()
+    assert jds._jds_confirmar_oferta_na_pagina(item, baixar=lambda u: "", motivos=motivos) is None
+    assert motivos["html_vazio"] == 1
+
+
+def test_pagina_bloqueada_rejeita():
+    item = _item_amazon_searchapi()
+    motivos = sap._motivos_zerados()
+    html = "sorry, we just need to make sure you're not a robot " + ("x" * 80)
+    assert jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos) is None
+    assert motivos["pagina_bloqueada"] == 1
+
+
+def test_preco_divergente_rejeita():
+    item = _item_amazon_searchapi()
+    motivos = sap._motivos_zerados()
+    html = _html(item["titulo"], "R$ 12,00", "B0CQKLS4RP")
+    assert jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos) is None
+    assert motivos["preco_nao_confere"] == 1
+
+
+def test_titulo_modelo_divergente_rejeita():
+    item = _item_amazon_searchapi()
+    motivos = sap._motivos_zerados()
+    html = _html("Apple iPhone 15 256GB Preto", "R$ 404,27", "B0CQKLS4RP")
+    assert jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos) is None
+    assert motivos["variante_nao_bate"] + motivos["matcher_rejeitou"] + motivos["condicao_nao_bate"] >= 1
+
+
+def test_url_generica_rejeita():
+    ofe = {
+        "title": "Sony DualSense PS5",
+        "extracted_price": 404.27,
+        "link": "https://www.amazon.com.br/s?k=dualsense",
+        "merchant": {"name": "Amazon.com.br"},
+    }
+    motivos = sap._motivos_zerados()
+    assert sap.offer_para_item("controle ps5 sony", ofe, "BR", motivos=motivos) is None
+    assert motivos["url_busca"] + motivos["url_nao_exata"] >= 1
+    item = {
+        "titulo": "Sony DualSense PS5",
+        "preco_num": 404.27,
+        "url": "https://www.amazon.com.br/s?k=dualsense",
+        "original_url": "https://www.amazon.com.br/s?k=dualsense",
+        "plataforma": "amazon",
+        "pais": "BR",
+    }
+    assert jds._jds_confirmar_oferta_na_pagina(item, html=_html("Sony DualSense PS5", "R$ 404,27", "B0CQKLS4RP")) is None
+
+
+def test_compativel_rejeitado_quando_consulta_pede_sony():
+    ofe = _load("offers_br_shopee.json")["offers"][0]
+    motivos = sap._motivos_zerados()
+    assert sap.offer_para_item("controle ps5 sony", ofe, "BR", motivos=motivos) is None
+    assert motivos["matcher_rejeitou"] + motivos["titulo_rejeitado"] >= 1
+
+
+def test_confirmer_baixa_original_url_nao_afiliada():
+    item = _item_amazon_searchapi()
+    original = item["original_url"]
+    item["url"] = original + "?tag=jdseconomiz0e-20"
+    visto = []
+
+    def baixar(url):
+        visto.append(url)
+        return _html(item["titulo"], "R$ 404,27", "B0CQKLS4RP")
+
+    ok = jds._jds_confirmar_listings([item], pais="BR", baixar=baixar)
+    assert visto == [original]
+    assert "tag=" not in visto[0]
+    assert len(ok) == 1
+    assert ok[0]["original_url"] == original
+    assert "tag=" in (ok[0].get("affiliate_url") or ok[0].get("url") or "")
+    assert ok[0]["titulo"] == item["titulo"]
+    assert ok[0]["preco_num"] == pytest.approx(404.27)
+
+
+def test_url_google_shopping_rejeitada():
+    ofe = {
+        "title": "Sony DualSense PS5",
+        "extracted_price": 404.27,
+        "link": "https://www.google.com/search?ibp=oshop&q=controle+ps5+sony",
+        "merchant": {"name": "Amazon.com.br"},
+    }
+    motivos = sap._motivos_zerados()
+    amostras = []
+    assert sap.offer_para_item("controle ps5 sony", ofe, "BR", motivos=motivos, amostras=amostras) is None
+    assert motivos["url_google"] == 1
+    assert amostras[0]["motivo"] == "url_google"
+
+
+def test_mesma_oferta_apos_confirmacao():
+    item = _item_amazon_searchapi()
+    titulo, preco, foto, orig = item["titulo"], item["preco_num"], item.get("foto"), item["original_url"]
+    html = _html(titulo, "R$ 404,27", "B0CQKLS4RP")
+    ok = jds._jds_confirmar_listings([item], pais="BR", baixar=lambda u: html)
+    assert len(ok) == 1
+    assert ok[0]["titulo"] == titulo
+    assert ok[0]["preco_num"] == pytest.approx(preco)
+    assert ok[0]["original_url"] == orig
+    if foto:
+        assert ok[0].get("foto") == foto
+    assert sap.validar_integridade_listing(ok[0])
+
+
+def test_onze_ofertas_diagnostico_sem_rede():
+    offers = _load("offers_br_11_diagnostico.json")
+    shopping = _load("shopping_br_sony_token.json")
+
+    def http_get(params):
+        if params.get("engine") == "google_shopping":
+            return 200, shopping, "{}"
+        return 200, offers, "{}"
+
+    def baixar(url):
+        assert "google." not in url.lower()
+        assert "/s?" not in url
+        assert "tag=" not in url
+        return _html("Controle sem fio DualSense Sony PS5 Branco", "R$ 404,27", "B0CQKLS4RP")
+
+    result, status = sap.buscar_ofertas_searchapi(
+        "controle ps5 sony",
+        pais="BR",
+        usar_cache=False,
+        http_get=http_get,
+        baixar=baixar,
+        confirmar=True,
+    )
+    diag = sap.ultimo_diag_searchapi()
+    assert diag["offers_received"] == 11
+    assert diag["offers_rejected"] == 10
+    assert diag["etapas"]["apos_parser"] == 1
+    assert diag["etapas"]["apos_matcher"] == 1
+    assert diag["etapas"]["confirmer_entrada"] == 1
+    assert status == "SEARCHAPI_SUCCESS"
+    assert len(result) == 1
+    assert result[0]["original_url"].endswith("/dp/B0CQKLS4RP")
+    assert result[0]["preco_num"] == pytest.approx(404.27)
+    assert result[0]["titulo"] == "Controle sem fio DualSense Sony PS5 Branco"
+    assert result[0].get("foto") == "https://m.media-amazon.com/images/I/dualsense-white.jpg"
+    amostras = diag.get("rejeicoes_ofertas") or []
+    assert len(amostras) == 10
+    for am in amostras:
+        assert am.get("motivo")
+        assert "titulo" in am
+        assert "loja" in am
+        assert "original_url" in am
