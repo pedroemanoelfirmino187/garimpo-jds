@@ -1504,3 +1504,93 @@ def test_serper_timeout_nao_prende(monkeypatch):
     assert time.monotonic() - t0 < 1.0
     assert dados == {}
     assert jds._SERPER_HTTP_STATS["timeouts"] == 2
+
+
+def test_shopping_br_rejeita_magalu_carrefour_olx_antes_do_po():
+    q = "iphone 15 128gb"
+    google = "https://www.google.com/search?ibp=oshop"
+    for seller, url in (
+        ("Magazine Luiza", google),
+        ("Magalu", "https://www.magazineluiza.com.br/iphone-15/p/abc"),
+        ("Carrefour", google),
+        ("OLX", "https://mg.olx.com.br/celulares/iphone-15-128gb"),
+    ):
+        row = _br_shop_row(seller=seller, link=url, product_token="tok-fora")
+        assert sap.shopping_para_candidato(q, row, "BR") is None
+    amz = sap.shopping_para_candidato(q, _br_shop_row(seller="Amazon.com.br", product_token="tok-amz"), "BR")
+    ml = sap.shopping_para_candidato(q, _br_shop_row(seller="Mercado Livre", product_token="tok-ml"), "BR")
+    sh = sap.shopping_para_candidato(q, _br_shop_row(seller="Shopee", product_token="tok-sh"), "BR")
+    assert amz and amz["plataforma"] == "amazon"
+    assert ml and ml["plataforma"] == "mercado_livre"
+    assert sh and sh["plataforma"] == "shopee"
+
+
+def test_selecao_br_prioriza_allowlist_antes_de_catalogo_sem_loja():
+    q = "iphone 15 128gb"
+    shopping = [
+        _br_shop_row(position=1, seller="Loja Generica", product_token="tok-gen"),
+        _br_shop_row(position=2, seller="Magazine Luiza", product_token="tok-magalu"),
+        _br_shop_row(position=3, seller="Amazon.com.br", product_token="tok-amz"),
+        _br_shop_row(position=4, seller="Mercado Livre", product_token="tok-ml"),
+        _br_shop_row(position=5, seller="Shopee", product_token="tok-sh"),
+        _br_shop_row(position=6, seller="Carrefour", product_token="tok-carre"),
+        _br_shop_row(position=7, seller="OLX", product_token="tok-olx"),
+    ]
+    escolhidos = sap.selecionar_candidatos_token(q, shopping, pais="BR", limite=3)
+    toks = [c["product_token"] for c in escolhidos]
+    plats = [c.get("plataforma") for c in escolhidos]
+    assert toks == ["tok-amz", "tok-ml", "tok-sh"]
+    assert plats == ["amazon", "mercado_livre", "shopee"]
+    assert "tok-magalu" not in toks
+    assert "tok-carre" not in toks
+    assert "tok-olx" not in toks
+    assert "tok-gen" not in toks
+
+
+def test_selecao_br_catalogo_so_depois_das_lojas_permitidas():
+    q = "iphone 15 128gb"
+    shopping = [
+        _br_shop_row(position=1, seller="Parceiro Shopping", product_token="tok-gen"),
+        _br_shop_row(position=2, seller="Amazon.com.br", product_token="tok-amz"),
+    ]
+    um = sap.selecionar_candidatos_token(q, shopping, pais="BR", limite=1)
+    assert [c["product_token"] for c in um] == ["tok-amz"]
+    dois = sap.selecionar_candidatos_token(q, shopping, pais="BR", limite=2)
+    assert [c["product_token"] for c in dois] == ["tok-amz", "tok-gen"]
+
+
+def test_orcamento_po_ainda_max_5_com_prioridade_br(monkeypatch, cache_isolado):
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    monkeypatch.setenv("SEARCHAPI_MAX_PRODUCT_OFFERS", "5")
+    visto = []
+    shopping = [
+        _br_shop_row(position=i, seller=seller, product_token=f"tok-{i}", product_id=f"pid-{i}")
+        for i, seller in enumerate(
+            ("Amazon.com.br", "Mercado Livre", "Shopee", "Magazine Luiza", "Carrefour", "OLX"),
+            start=1,
+        )
+    ]
+
+    def http_get(params):
+        visto.append(params.get("engine"))
+        if params.get("engine") == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        if params.get("engine") == "google_product_offers":
+            assert "product_id" not in params
+            return 200, {"offers": []}, "{}"
+        if params.get("engine") == "google_product_page":
+            return 200, {"product": {}}, "{}"
+        raise AssertionError(params.get("engine"))
+
+    sap.buscar_ofertas_searchapi(
+        "iphone 15 128gb", pais="BR", usar_cache=False, http_get=http_get, confirmar=False,
+    )
+    assert visto.count("google_shopping") == 1
+    assert len(visto) <= 5
+    diag = sap.ultimo_diag_searchapi()
+    assert diag["searchapi_requests"] <= 5
+    assert diag["searchapi_budget"] == 5
+    assert jds._lojas_do_pais("BR") == ("amazon", "mercado_livre", "shopee")
+    plats = [c.get("plataforma") for c in (diag.get("po_selecionados") or [])]
+    assert plats[:3] == ["amazon", "mercado_livre", "shopee"]
+    assert all(c.get("seller") not in {"Magazine Luiza", "Carrefour", "OLX"} for c in (diag.get("po_selecionados") or []))

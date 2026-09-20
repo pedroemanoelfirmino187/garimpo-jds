@@ -487,6 +487,23 @@ def _plat_de_oferta(vendedor, url, pais="BR"):
     return plat or ""
 
 
+def _seller_br_fora_allowlist(vendedor, url=""):
+    """Lojas visíveis no Shopping que não entram na allowlist BR. Não amplia a allowlist."""
+    t = jds._sem_acento(vendedor or "")
+    u = (url or "").lower()
+    if "carrefour" in t or "carrefour.com" in u:
+        return True
+    if "trocafy" in t or "trocafy.com" in u:
+        return True
+    if "magalu" in t or "magazine luiza" in t or "magazineluiza.com" in u:
+        return True
+    if t in {"olx", "olx brasil"} or "olx.com.br" in u or u.startswith("https://olx.") or "/olx.com" in u:
+        return True
+    if t == "olx" or t.startswith("olx "):
+        return True
+    return False
+
+
 def _score_candidato_shopping(query, cand, pais="BR"):
     item_ref = {
         "titulo": cand.get("titulo") or "",
@@ -551,6 +568,8 @@ def shopping_para_candidato(query, bruto, pais="BR"):
     seller = str(bruto.get("seller") or "").strip()
     link = str(bruto.get("link") or "").strip()
     plat = _plat_de_oferta(seller, link, pais=pais)
+    if jds._normalizar_pais(pais) == "BR" and _seller_br_fora_allowlist(seller, link):
+        return None
     if plat and plat not in jds._lojas_do_pais(pais):
         return None
     if plat and not jds._source_loja_oficial(seller or plat, pais=pais) and seller:
@@ -590,6 +609,7 @@ def selecionar_candidatos_token(query, shopping, pais="BR", limite=None):
     escolhidos = []
     vistos = set()
     plats = set()
+    allow = set(jds._lojas_do_pais(pais))
 
     def _encaixar(cand):
         tok = cand.get("product_token")
@@ -608,21 +628,23 @@ def selecionar_candidatos_token(query, shopping, pais="BR", limite=None):
             if cand.get("plataforma") == "ebay" and _encaixar(cand):
                 break
 
-    for score, cand in scored:
-        tok = cand["product_token"]
-        if tok in vistos:
-            continue
+    for _score, cand in scored:
         plat = cand.get("plataforma")
-        if plat and plat in plats:
+        if plat not in allow or plat in plats:
+            continue
+        if _encaixar(cand) and len(escolhidos) >= limite:
+            return escolhidos
+    for _score, cand in scored:
+        if cand.get("product_token") in vistos:
+            continue
+        if cand.get("plataforma") not in allow:
+            continue
+        if _encaixar(cand) and len(escolhidos) >= limite:
+            return escolhidos
+    for _score, cand in scored:
+        if cand.get("product_token") in vistos:
             continue
         _encaixar(cand)
-        if len(escolhidos) >= limite:
-            return escolhidos
-    for score, cand in scored:
-        if cand["product_token"] in vistos:
-            continue
-        escolhidos.append(cand)
-        vistos.add(cand["product_token"])
         if len(escolhidos) >= limite:
             break
     return escolhidos
@@ -1157,6 +1179,14 @@ def buscar_ofertas_searchapi(
             candidatos.append(cand)
 
     tokens = selecionar_candidatos_token(t, shopping, pais=pais, limite=_max_product_offers())
+    po_selecionados = [
+        {
+            "seller": str(c.get("seller") or "")[:80],
+            "plataforma": c.get("plataforma") or "",
+            "token_hash": _hash_token(c.get("product_token") or ""),
+        }
+        for c in tokens
+    ]
     contagens_ids = _contagens_ids_candidatos(candidatos)
     tem_product_id = any(c.get("product_id") not in (None, "") for c in candidatos)
     product_page_requests = 0
@@ -1403,6 +1433,8 @@ def buscar_ofertas_searchapi(
         **contagens_ids,
         "po_fila_candidatos": po_fila_candidatos,
         "po_fila_tokens_distintos": po_fila_tokens_distintos,
+        "po_selecionados": po_selecionados,
+        "po_tokens_consultados": [_hash_token(tok) for tok in tokens_vistos],
         "product_page_requests": product_page_requests,
         "product_page_recovered": product_page_recovered,
         "product_page_failed": product_page_failed,
@@ -1435,6 +1467,8 @@ def buscar_ofertas_searchapi(
         **contagens_ids,
         po_fila_candidatos=po_fila_candidatos,
         po_fila_tokens_distintos=po_fila_tokens_distintos,
+        po_selecionados=po_selecionados,
+        po_tokens_consultados=[_hash_token(tok) for tok in tokens_vistos],
         product_page_requests=product_page_requests,
         product_page_recovered=product_page_recovered,
         product_page_failed=product_page_failed,
