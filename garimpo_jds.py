@@ -809,7 +809,7 @@ def _url_e_busca_loja(url):
         return True
     qs = urllib.parse.parse_qs(parsed.query)
     if any(k in qs for k in ("keyword", "keywords", "_nkw")):
-        if any(x in path for x in ("/dp/", "/gp/product/", "/p/", "/itm/", "-i.")):
+        if any(x in path for x in ("/dp/", "/gp/product/", "/p/", "/itm/", "-i.", "/product/")):
             return False
         return True
     if ("k" in qs or "q" in qs) and (
@@ -2578,6 +2578,17 @@ def _resposta_util_loja(url, texto):
         return tem_preco or (tem_loja and tem_card) or (tem_preco and tem_loja)
     if "shopee.com.br/api" in u:
         return '"items"' in texto or '"item_basic"' in texto
+    if "shopee.com.br" in u:
+        t = texto.lower()
+        if "/search" in u:
+            return False
+        return (
+            "og:title" in t
+            or '"itemid"' in t
+            or "itemid" in t
+            or "-i." in t
+            or "product:price" in t
+        )
     if "mercadolivre." in u or "mercadolibre." in u:
         return "ui-search" in texto or "poly-card" in texto or "andes-money" in texto or "/p/" in texto
     return True
@@ -7039,15 +7050,26 @@ def _jds_armazenamento_gb(texto):
 
 def _jds_titulo_html_anuncio(html):
     html = html or ""
-    m = re.search(r'id="productTitle"[^>]*>\s*([^<]+)', html, flags=re.I)
-    if m:
-        return re.sub(r"\s+", " ", m.group(1)).strip()
-    m = re.search(r'property="og:title"\s+content="([^"]+)"', html, flags=re.I)
-    if m:
-        return re.sub(r"\s+", " ", m.group(1)).strip()
-    m = re.search(r"<title>([^<]+)", html, flags=re.I)
-    if m:
-        return re.sub(r"\s+", " ", m.group(1)).split("|")[0].split(":")[0].strip()
+    padroes = (
+        r'id="productTitle"[^>]*>\s*([^<]+)',
+        r'property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']',
+        r'content=["\']([^"\']+)["\'][^>]*property=["\']og:title["\']',
+        r'"@type"\s*:\s*"Product"\s*,\s*"name"\s*:\s*"([^"]+)"',
+        r'"itemid"\s*:\s*\d+.{0,400}?"name"\s*:\s*"([^"]+)"',
+        r"<title>([^<]+)",
+    )
+    vazios = {
+        "shopee", "shopee brasil", "shopee.com.br",
+        "amazon", "amazon.com", "amazon.com.br",
+        "mercado livre", "mercadolivre",
+    }
+    for pat in padroes:
+        m = re.search(pat, html, flags=re.I | re.S)
+        if not m:
+            continue
+        t = re.sub(r"\s+", " ", m.group(1)).split("|")[0].strip()
+        if t and _sem_acento(t) not in vazios:
+            return t
     return ""
 
 
@@ -7066,9 +7088,21 @@ def _jds_precos_html_anuncio(html, pais="BR"):
         r'itemprop="price"\s+content="([0-9]+(?:[.,][0-9]+)?)"',
         r'class="a-offscreen">\s*([^<]{3,40})',
         r"andes-money-amount__fraction[^>]*>([^<]{1,20})",
+        r'property=["\'](?:og:price:amount|product:price:amount)["\'][^>]*content=["\']([^"\']+)["\']',
+        r'content=["\']([^"\']+)["\'][^>]*property=["\'](?:og:price:amount|product:price:amount)["\']',
     ):
         for bruto in re.findall(pat, recorte, flags=re.I)[:8]:
             n = _preco_para_numero(bruto, pais=pais)
+            if 1 < n < 999990:
+                valores.append(round(n, 2))
+    if '"itemid"' in recorte.lower():
+        for bruto in re.findall(r'"price"\s*:\s*(\d+)', recorte)[:8]:
+            try:
+                n = float(bruto)
+            except (TypeError, ValueError):
+                continue
+            if n >= 100000:
+                n = n / 100000.0
             if 1 < n < 999990:
                 valores.append(round(n, 2))
     vistos = []
@@ -7099,6 +7133,18 @@ def _jds_variante_bate(titulo_card, titulo_pagina):
     return True
 
 
+def _ids_shopee(url):
+    """shop_id e item_id de -i.shop.item ou /product/shop/item."""
+    u = url or ""
+    m = re.search(r"-i\.(\d+)\.(\d+)", u, flags=re.I)
+    if m:
+        return m.group(1), m.group(2)
+    m = re.search(r"/product/(\d+)/(\d+)", u, flags=re.I)
+    if m:
+        return m.group(1), m.group(2)
+    return "", ""
+
+
 def _jds_id_anuncio_na_pagina(url, plat, html):
     html = html or ""
     baixa = html.lower()
@@ -7115,7 +7161,10 @@ def _jds_id_anuncio_na_pagina(url, plat, html):
             return mlb in html or f"/p/mlb{mlb}".lower() in baixa
         return "/p/" in (url or "").lower() and "/p/" in baixa
     if plat == "shopee":
-        return "-i." in (url or "").lower()
+        shop, itemid = _ids_shopee(url)
+        if not shop or not itemid:
+            return False
+        return shop in (html or "") and itemid in (html or "")
     if plat == "ebay":
         eid = _id_ebay(url)
         return bool(eid) and eid in (html or "")

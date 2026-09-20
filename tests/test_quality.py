@@ -420,3 +420,116 @@ def test_titulo_tela_especificacao_do_aparelho_passa(titulo):
 )
 def test_titulo_tela_peca_e_acessorio_continua_bloqueado(titulo):
     assert jds._titulo_shopping_ok(QUERY_IPHONE, titulo) is False
+
+
+SHOPEE_PDP = "https://shopee.com.br/product/344390826/22298055735"
+SHOPEE_TITULO = "Apple iPhone 15 128GB 6GB Ram Tela 6.1'' Câmera Tripla 48Mp"
+
+
+def _oferta_shopee(url=SHOPEE_PDP, titulo=SHOPEE_TITULO, preco=3772.0):
+    return {
+        "titulo": titulo,
+        "preco_num": preco,
+        "preco_numerico": preco,
+        "url": url,
+        "original_url": url,
+        "link": url,
+        "imagem": "https://cf.shopee.com.br/file/iphone.jpg",
+        "foto": "https://cf.shopee.com.br/file/iphone.jpg",
+        "plataforma": "shopee",
+        "loja": "Shopee",
+        "fonte": "searchapi",
+        "pais": "BR",
+    }
+
+
+def _html_shopee_pdp_legitima():
+    return f"""
+    <html><head>
+    <meta content="{SHOPEE_TITULO} | Shopee Brasil" property="og:title">
+    <meta content="3772.00" property="product:price:amount">
+    <title>Shopee Brasil</title>
+    </head><body>
+    <script>window.__INITIAL_STATE__={{"itemid":22298055735,"shopid":344390826,"name":"{SHOPEE_TITULO}","price":377200000}}</script>
+    {"x" * 80}
+    </body></html>
+    """
+
+
+def test_confirmer_aceita_pdp_shopee_product_com_evidencia():
+    item = _oferta_shopee()
+    html = _html_shopee_pdp_legitima()
+    ok = jds._jds_confirmar_oferta_na_pagina(item, html=html)
+    assert ok is not None
+    assert ok["plataforma"] == "shopee"
+    assert ok["preco_num"] == pytest.approx(3772.0)
+    assert "/product/344390826/22298055735" in ok["original_url"]
+    assert ok.get("confirmada_pagina") is True
+
+
+def test_confirmer_rejeita_busca_e_categoria_shopee():
+    html = _html_shopee_pdp_legitima()
+    busca = _oferta_shopee(url="https://shopee.com.br/search?keyword=iphone+15+128gb")
+    assert jds._jds_confirmar_oferta_na_pagina(busca, html=html) is None
+    cat = _oferta_shopee(url="https://shopee.com.br/Celulares-Smartphones-cat.11036030")
+    assert jds._jds_confirmar_oferta_na_pagina(cat, html=html) is None
+
+
+def test_confirmer_rejeita_shopee_sem_evidencia_de_produto():
+    item = _oferta_shopee()
+    casca = "<html><head><title>Shopee Brasil</title></head><body>" + ("y" * 90) + "</body></html>"
+    motivos = {"pagina_inutil": 0, "html_vazio": 0, "confirmer_rejeitou": 0}
+    assert jds._jds_confirmar_oferta_na_pagina(item, html=casca, motivos=motivos) is None
+    assert motivos["pagina_inutil"] >= 1
+    inexistente = (
+        '<html><head><meta property="og:title" content="Produto indisponível | Shopee Brasil">'
+        "</head><body>" + ("z" * 90) + "</body></html>"
+    )
+    assert jds._jds_confirmar_oferta_na_pagina(item, html=inexistente) is None
+
+
+def test_confirmer_amazon_e_ml_seguem_exigindo_id_na_pagina():
+    amazon = _oferta_amazon("Apple iPhone 15 128GB Preto", 4776.0, "B0CP6CVJSG")
+    busca_amz = dict(amazon)
+    busca_amz["url"] = "https://www.amazon.com.br/s?k=iphone+15"
+    busca_amz["original_url"] = busca_amz["url"]
+    busca_amz["link"] = busca_amz["url"]
+    html_amz_ok = """
+    <html><body>
+    <span id="productTitle">Apple iPhone 15 128GB Preto</span>
+    <span class="a-offscreen">R$4.776,00</span>
+    B0CP6CVJSG
+    """ + ("x" * 80) + "</body></html>"
+    assert jds._jds_confirmar_oferta_na_pagina(busca_amz, html=html_amz_ok) is None
+    html_amz_sem_titulo = "<html><body><span class=\"a-offscreen\">R$4.776,00</span>B0CP6CVJSG" + ("x" * 80) + "</body></html>"
+    assert jds._jds_confirmar_oferta_na_pagina(amazon, html=html_amz_sem_titulo) is None
+    assert jds._jds_confirmar_oferta_na_pagina(amazon, html=html_amz_ok) is not None
+    ml = {
+        "titulo": "Apple iPhone 15 128GB Preto",
+        "preco_num": 3999.0,
+        "url": "https://www.mercadolivre.com.br/apple-iphone-15-128-gb-preto/p/MLB2000139744",
+        "original_url": "https://www.mercadolivre.com.br/apple-iphone-15-128-gb-preto/p/MLB2000139744",
+        "imagem": "https://http2.mlstatic.com/x.jpg",
+        "foto": "https://http2.mlstatic.com/x.jpg",
+        "plataforma": "mercado_livre",
+        "loja": "Mercado Livre",
+        "fonte": "searchapi",
+        "pais": "BR",
+    }
+    html_ml_sem_id = """
+    <html><head><meta property="og:title" content="Apple iPhone 15 128GB Preto"></head>
+    <body><span class="andes-money-amount__fraction">3999</span>
+    <span>R$ 3.999,00</span>
+    """ + ("x" * 80) + "</body></html>"
+    assert jds._jds_confirmar_oferta_na_pagina(ml, html=html_ml_sem_id) is None
+    html_ml_ok = """
+    <html><head><meta property="og:title" content="Apple iPhone 15 128GB Preto"></head>
+    <body>/p/MLB2000139744 <span class="andes-money-amount__fraction">3999</span>
+    <span>R$ 3.999,00</span>
+    """ + ("x" * 80) + "</body></html>"
+    assert jds._jds_confirmar_oferta_na_pagina(ml, html=html_ml_ok) is not None
+    lista_ml = dict(ml)
+    lista_ml["url"] = "https://lista.mercadolivre.com.br/iphone-15-128gb"
+    lista_ml["original_url"] = lista_ml["url"]
+    lista_ml["link"] = lista_ml["url"]
+    assert jds._jds_confirmar_oferta_na_pagina(lista_ml, html=html_ml_ok) is None
