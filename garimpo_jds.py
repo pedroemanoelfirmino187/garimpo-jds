@@ -831,7 +831,18 @@ def _url_anuncio_exato(url, plat):
     if plat == "mercado_livre":
         if _parece_url_conteudo(u):
             return False
-        return bool(_id_mlb(url)) or "/p/" in u or "produto.mercadolivre." in u or "produto.mercadolibre." in u
+        if not _host_mercado_livre(url):
+            return False
+        if _id_mlbu(url):
+            return True
+        if _id_mlb(url):
+            return True
+        path = urllib.parse.urlparse(u).path or ""
+        if re.search(r"/p/(mlb-?\d{6,}|\w[\w-]*)", path, flags=re.I):
+            return True
+        if "produto.mercadolivre." in u or "produto.mercadolibre." in u:
+            return True
+        return False
     if plat == "shopee":
         return "-i." in u or "/product/" in u
     if plat == "ebay":
@@ -964,6 +975,7 @@ def _eh_pagina_compra(url, plat):
         return (
             "/p/" in u
             or "/mlb" in u
+            or "/up/mlbu" in u
             or "produto.mercadolivre." in u
             or "produto.mercadolibre." in u
             or "orderid_price" in u
@@ -997,6 +1009,42 @@ def _asin_amazon(url):
 def _id_mlb(url):
     achado = re.search(r"MLB-?(\d{8,})", url or "", re.I)
     return achado.group(1) if achado else ""
+
+
+def _host_mercado_livre(url):
+    """Host canônico do Mercado Livre. Exclui lista/listado e domínios de terceiros."""
+    bruto = str(url or "").strip()
+    parsed = urllib.parse.urlparse(bruto)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.netloc or "").lower()
+    if "@" in host or not host:
+        return False
+    if host.startswith("www."):
+        host = host[4:]
+    if host.startswith("lista.") or host.startswith("listado."):
+        return False
+    if host.startswith("produto."):
+        host = host[8:]
+    return host in {
+        "mercadolivre.com.br",
+        "mercadolibre.com.br",
+        "mercadolibre.com",
+    }
+
+
+def _id_mlbu(url):
+    """User Product MLBU só no path /up/MLBU… de um host do Mercado Livre."""
+    bruto = str(url or "").strip()
+    if not bruto.startswith("http"):
+        return ""
+    if not _host_mercado_livre(bruto):
+        return ""
+    path = urllib.parse.urlparse(bruto).path or ""
+    achado = re.search(r"/up/(MLBU\d{8,})\b", path, flags=re.I)
+    if not achado:
+        return ""
+    return achado.group(1).upper()
 
 
 def _id_ebay(url):
@@ -6995,6 +7043,10 @@ def _jds_id_anuncio_na_pagina(url, plat, html):
         asin = (_asin_amazon(url) or "").lower()
         return bool(asin) and (asin in baixa or asin in (url or "").lower())
     if plat == "mercado_livre":
+        mlbu = _id_mlbu(url)
+        if mlbu:
+            chave = mlbu.lower()
+            return chave in baixa or f"/up/{chave}" in baixa
         mlb = _id_mlb(url)
         if mlb:
             return mlb in html or f"/p/mlb{mlb}".lower() in baixa
