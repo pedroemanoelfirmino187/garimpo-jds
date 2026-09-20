@@ -1496,6 +1496,22 @@ def _titulo_relevante(termo, titulo):
     return hits >= max(2, int(len(toks) * 0.7))
 
 
+def _tela_como_peca(titulo_norm):
+    """True só quando 'tela' é peça/reposição, não especificação (Tela 6.1 / OLED)."""
+    t = titulo_norm or ""
+    if not re.search(r"\btela\b", t):
+        return False
+    if re.search(r"\b(reposicao|reposto)\b", t):
+        return True
+    if re.search(r"\btela\s+para\b", t):
+        return True
+    if re.search(r"\bmodulo\s+(de\s+)?tela\b", t):
+        return True
+    if re.match(r"^\s*tela\b", t):
+        return True
+    return False
+
+
 def _parece_acessorio_barato(titulo, termo=""):
     t = _sem_acento(titulo)
     tl = _sem_acento(termo)
@@ -1516,7 +1532,7 @@ def _parece_acessorio_barato(titulo, termo=""):
         return True
     if any(k in tl for k in ("redmi", "iphone", "xiaomi", "smartphone", "celular", "galaxy")) and (
         re.search(r"\bcapas?\b", t)
-        or re.search(r"\btela\b", t)
+        or _tela_como_peca(t)
         or any(
             x in t for x in (
                 "capinha", "pelicula", " case", "case ", "cover", "bumper",
@@ -5287,6 +5303,23 @@ def executar_testes_unitarios():
             "Kit Capa Anti Impacto e Película De Vidro 3D",
         ),
         "peça e capa do Redmi não viram o celular",
+    )
+    checar(
+        _titulo_shopping_ok(
+            "iPhone 15 128GB",
+            "Apple iPhone 15 128GB 6GB Ram Tela 6.1'' Câmera Tripla 48Mp",
+        )
+        and _titulo_shopping_ok("iPhone 15 128GB", "iPhone 15 128GB Tela OLED")
+        and _titulo_shopping_ok("iPhone 15 128GB", "iPhone 15 128GB Tela Super Retina")
+        and not _titulo_shopping_ok("iPhone 15 128GB", "Tela de reposição para iPhone 15")
+        and not _titulo_shopping_ok("iPhone 15 128GB", "Tela LCD para iPhone 15")
+        and not _titulo_shopping_ok("iPhone 15 128GB", "Tela para iPhone 15")
+        and not _titulo_shopping_ok("iPhone 15 128GB", "Display para iPhone 15")
+        and not _titulo_shopping_ok("iPhone 15 128GB", "Módulo de tela iPhone 15")
+        and not _titulo_shopping_ok("iPhone 15 128GB", "Película para iPhone 15")
+        and not _titulo_shopping_ok("iPhone 15 128GB", "Capa para iPhone 15")
+        and not _titulo_shopping_ok("iPhone 15 128GB", "Case para iPhone 15"),
+        "tela 6.1/OLED é spec; tela/capa/case/display de peça não passam",
     )
     checar(
         not _titulo_shopping_ok("whey protein", "100% Whey Crush - 1 Sachê 30g Chocobear")

@@ -384,3 +384,39 @@ def test_api_aceita_token_valido_sem_chamar_loja():
             os.environ.pop("JDS_API_TOKEN", None)
         else:
             os.environ["JDS_API_TOKEN"] = old
+
+
+QUERY_IPHONE = "iPhone 15 128GB"
+
+
+@pytest.mark.parametrize(
+    "titulo",
+    [
+        "Apple iPhone 15 128GB 6GB Ram Tela 6.1'' Câmera Tripla 48Mp",
+        "iPhone 15 128GB Tela OLED",
+        "iPhone 15 128GB Tela Super Retina",
+        "Apple iPhone 15 128GB Tela 6.1 Super Retina",
+        "Apple iPhone 15 128GB Tela 6,1 OLED",
+    ],
+)
+def test_titulo_tela_especificacao_do_aparelho_passa(titulo):
+    assert jds._parece_acessorio_barato(titulo, QUERY_IPHONE) is False
+    assert jds._titulo_shopping_ok(QUERY_IPHONE, titulo) is True
+    assert jds._jds_anuncio_bate_consulta(QUERY_IPHONE, titulo) is True
+
+
+@pytest.mark.parametrize(
+    "titulo",
+    [
+        "Tela de reposição para iPhone 15",
+        "Tela LCD para iPhone 15",
+        "Tela para iPhone 15",
+        "Display para iPhone 15",
+        "Módulo de tela iPhone 15",
+        "Película para iPhone 15",
+        "Capa para iPhone 15",
+        "Case para iPhone 15",
+    ],
+)
+def test_titulo_tela_peca_e_acessorio_continua_bloqueado(titulo):
+    assert jds._titulo_shopping_ok(QUERY_IPHONE, titulo) is False
