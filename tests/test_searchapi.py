@@ -463,6 +463,70 @@ def test_html_vazio_rejeita():
     assert motivos["html_vazio"] == 1
 
 
+def test_html_sem_preco_searchapi_com_token_confirma():
+    ofe = dict(_load("offers_br_amazon.json")["offers"][0])
+    ofe["product_token"] = "tok-estrutura-real"
+    ofe["product_id"] = "111222333"
+    item = sap.offer_para_item("controle ps5 sony", ofe, "BR")
+    assert item is not None
+    assert item["listing_source"]["product_token"] == "tok-estrutura-real"
+    assert item["listing_source"]["product_id"] == "111222333"
+    html = (
+        f"<html><body><span id=\"productTitle\">{item['titulo']}</span>"
+        f"B0CQKLS4RP{'x' * 80}</body></html>"
+    )
+    motivos = sap._motivos_zerados()
+    ok = jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos)
+    assert ok is not None
+    assert ok["confirmada_pagina"] is True
+    assert ok["confirmacao"] == "searchapi_structured_offer"
+    assert ok["preco_num"] == pytest.approx(404.27)
+    assert ok["titulo"] == item["titulo"]
+    assert ok["original_url"] == item["original_url"]
+    assert motivos.get("preco_nao_encontrado", 0) == 0
+
+
+def test_html_sem_preco_sem_token_nem_id_rejeita():
+    item = _item_amazon_searchapi()
+    item["listing_source"]["product_token"] = ""
+    item["listing_source"]["product_id"] = ""
+    html = (
+        f"<html><body><span id=\"productTitle\">{item['titulo']}</span>"
+        f"B0CQKLS4RP{'x' * 80}</body></html>"
+    )
+    motivos = sap._motivos_zerados()
+    assert jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos) is None
+    assert motivos["preco_nao_encontrado"] == 1
+
+
+def test_html_sem_preco_estruturado_divergente_rejeita():
+    ofe = dict(_load("offers_br_amazon.json")["offers"][0])
+    ofe["product_token"] = "tok-estrutura-real"
+    item = sap.offer_para_item("controle ps5 sony", ofe, "BR")
+    item["listing_source"]["preco_num"] = 12.0
+    item["listing_source"]["extracted_price"] = 12.0
+    html = (
+        f"<html><body><span id=\"productTitle\">{item['titulo']}</span>"
+        f"B0CQKLS4RP{'x' * 80}</body></html>"
+    )
+    motivos = sap._motivos_zerados()
+    assert jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos) is None
+    assert motivos["preco_nao_encontrado"] == 1
+
+
+def test_html_sem_preco_nao_searchapi_rejeita():
+    item = _item_amazon_searchapi()
+    item["fonte"] = "serper"
+    item["listing_source"]["product_token"] = "tok-estrutura-real"
+    html = (
+        f"<html><body><span id=\"productTitle\">{item['titulo']}</span>"
+        f"B0CQKLS4RP{'x' * 80}</body></html>"
+    )
+    motivos = sap._motivos_zerados()
+    assert jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos) is None
+    assert motivos["preco_nao_encontrado"] == 1
+
+
 def test_pagina_bloqueada_rejeita():
     item = _item_amazon_searchapi()
     motivos = sap._motivos_zerados()

@@ -726,6 +726,8 @@ def offer_para_item(query, offer, pais="BR", motivos=None, amostras=None):
         "vendedor": vendedor,
         "url": original,
         "imagem": foto,
+        "product_token": str(offer.get("product_token") or "").strip(),
+        "product_id": str(offer.get("product_id") or "").strip(),
     }
     if foto:
         item["foto"] = foto
@@ -1215,6 +1217,10 @@ def buscar_ofertas_searchapi(
             "merchant": {"name": cand.get("seller") or plat},
             "thumbnail": cand.get("imagem") or "",
         }
+        if cand.get("product_token"):
+            fake_offer["product_token"] = cand.get("product_token")
+        if cand.get("product_id") not in (None, ""):
+            fake_offer["product_id"] = cand.get("product_id")
         item = offer_para_item(t, fake_offer, pais=pais, motivos=motivos, amostras=amostras)
         if item:
             itens.append(item)
@@ -1286,7 +1292,16 @@ def buscar_ofertas_searchapi(
             return
         offers_recv += len(offers)
         for ofe in offers:
-            item = offer_para_item(t, ofe, pais=pais, motivos=motivos, amostras=amostras)
+            if not isinstance(ofe, dict):
+                rejeitadas += 1
+                continue
+            ofe_uso = dict(ofe)
+            if tok and not str(ofe_uso.get("product_token") or "").strip():
+                ofe_uso["product_token"] = tok
+            pid = cand.get("product_id")
+            if pid not in (None, "") and not str(ofe_uso.get("product_id") or "").strip():
+                ofe_uso["product_id"] = pid
+            item = offer_para_item(t, ofe_uso, pais=pais, motivos=motivos, amostras=amostras)
             if not item:
                 rejeitadas += 1
                 continue

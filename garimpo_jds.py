@@ -2258,7 +2258,7 @@ def _ordenar_entrega_menor_preco(lista_produtos):
 
 def _chave_cache(termo, pais="BR"):
     pais = _normalizar_pais(pais)
-    return "v43:" + pais + ":" + _termo_cache_norm(termo)
+    return "v44:" + pais + ":" + _termo_cache_norm(termo)
 
 
 def _termo_cache_norm(termo):
@@ -7241,6 +7241,34 @@ def _anotar_rejeicao_confirmer(motivos, amostras, motivo, item):
     })
 
 
+def _searchapi_preco_estruturado_ok(item, preco):
+    """Preço do SearchApi no listing, com token/id real — não substitui as outras provas."""
+    if not isinstance(item, dict) or (item.get("fonte") or "") != "searchapi":
+        return False
+    origem = item.get("listing_source") if isinstance(item.get("listing_source"), dict) else None
+    if not origem:
+        return False
+    if not str(origem.get("product_token") or "").strip() and not str(origem.get("product_id") or "").strip():
+        return False
+    estruturado = origem.get("preco_num")
+    if estruturado in (None, ""):
+        estruturado = origem.get("extracted_price")
+    try:
+        estruturado_n = float(estruturado)
+        preco_n = float(preco)
+    except (TypeError, ValueError):
+        return False
+    if estruturado_n <= 0 or preco_n <= 0:
+        return False
+    if abs(estruturado_n - preco_n) > 0.01:
+        return False
+    pais = _normalizar_pais(item.get("pais") or "BR")
+    plat = item.get("plataforma") or _plataforma_loja(item.get("original_url") or item.get("url") or "")
+    if plat not in _lojas_do_pais(pais):
+        return False
+    return True
+
+
 def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None, motivos=None, amostras=None):
     """Só mantém a oferta se a PDP original confirmar título/variante/condição/preço.
 
@@ -7305,10 +7333,13 @@ def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None, motivos=None, 
         _anotar_rejeicao_confirmer(motivos, amostras, "variante_nao_bate", item)
         return None
     precos_pagina = _jds_precos_html_anuncio(html, pais=pais)
+    confirmacao_estruturada = False
     if not precos_pagina:
-        _anotar_rejeicao_confirmer(motivos, amostras, "preco_nao_encontrado", item)
-        return None
-    if not _jds_preco_bate_com_pagina(preco, precos_pagina):
+        if not _searchapi_preco_estruturado_ok(item, preco):
+            _anotar_rejeicao_confirmer(motivos, amostras, "preco_nao_encontrado", item)
+            return None
+        confirmacao_estruturada = True
+    elif not _jds_preco_bate_com_pagina(preco, precos_pagina):
         _anotar_rejeicao_confirmer(motivos, amostras, "preco_nao_confere", item)
         return None
     if plat == "ebay" and pais != "US":
@@ -7327,6 +7358,8 @@ def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None, motivos=None, 
             return None
     item = dict(item)
     item["confirmada_pagina"] = True
+    if confirmacao_estruturada:
+        item["confirmacao"] = "searchapi_structured_offer"
     item["original_url"] = pdp
     item["titulo"] = titulo
     item["preco_num"] = preco
