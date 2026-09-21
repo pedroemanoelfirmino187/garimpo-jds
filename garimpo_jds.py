@@ -6797,7 +6797,12 @@ def _jds_pdp_fallback_confirma(termo, titulo_card, preco_card, url, plat, pais="
         return None
     if _titulo_usado(titulo_card) or _titulo_usado(titulo_pagina):
         return None
-    if not _titulo_shopping_ok(termo, titulo_card) or not _titulo_shopping_ok(termo, titulo_pagina):
+    cap_q = _jds_armazenamento_gb(termo)
+    cap_p = _jds_armazenamento_gb(titulo_pagina)
+    if cap_q:
+        if not cap_p or cap_q.isdisjoint(cap_p):
+            return None
+    elif not _titulo_shopping_ok(termo, titulo_pagina):
         return None
     if not _jds_variante_bate(titulo_card, titulo_pagina):
         return None
@@ -6922,6 +6927,16 @@ def _jds_item_serper(termo, bruto, pais="BR", baixar=None, organic=None):
         return None
     if preco <= 0:
         return None
+    if not _titulo_shopping_ok(termo, titulo):
+        html_pdp = _jds_html_pdp_fallback(href, baixar=baixar)
+        fb = _jds_pdp_fallback_confirma(
+            termo, titulo, preco, href, plat, pais=pais, html=html_pdp,
+        )
+        if not fb:
+            return None
+        href = fb["url"]
+        titulo = fb["titulo"]
+        preco = fb["preco_num"]
     item = _item_google(termo, titulo, preco, href, bloco.get("imageUrl"), plat, origem="serper", pais=pais)
     if not item:
         return None
