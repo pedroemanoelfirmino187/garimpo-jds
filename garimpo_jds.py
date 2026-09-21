@@ -7473,11 +7473,31 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
         })
         return []
     candidatos = _jds_extrair_candidatos(t, cru, pais=pais, limite=40)
-    resultado = _jds_comparar_mesmo_produto(t, candidatos, pais=pais)
-    resultado = _jds_confirmar_listings(resultado, pais=pais)
+    apos_matcher = _jds_comparar_mesmo_produto(t, candidatos, pais=pais)
+    resultado = _jds_confirmar_listings(apos_matcher, pais=pais)
     resultado = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(resultado, pais=pais))
     if resultado and usar_cache and not sem_cache:
         _gravar_cache_garimpo(t, resultado, pais=pais)
+    _ULTIMO_DIAG_SERPER.clear()
+    _ULTIMO_DIAG_SERPER.update({
+        "q": t,
+        "http": http,
+        "shopping": len(cru or []),
+        "apos_extrair": len(candidatos),
+        "apos_matcher": len(apos_matcher or []),
+        "apos_confirmer": len(resultado or []),
+        "ofertas": len(resultado or []),
+        "amostra": [
+            {
+                "source": str(it.get("source") or "")[:40],
+                "title": str(it.get("title") or "")[:80],
+                "price": str(it.get("price") or it.get("extracted_price") or ""),
+                "link": str(it.get("link") or it.get("productLink") or "")[:120],
+            }
+            for it in (cru or [])[:4]
+        ],
+        "serper_timeouts": _SERPER_HTTP_STATS["timeouts"],
+    })
     return resultado[:limite]
 
 
@@ -7524,13 +7544,19 @@ def buscar_ofertas_jds_shopping(termo, usar_cache=True, limite=20, pais="BR"):
     )
     sap = dict(sap or {})
     sap["serper_timeouts"] = _SERPER_HTTP_STATS["timeouts"]
+    serper_diag = dict(_ULTIMO_DIAG_SERPER)
+    _ULTIMO_DIAG_SERPER.clear()
     _ULTIMO_DIAG_SERPER.update({
+        "q": t,
         "fonte": "serper_fallback",
         "searchapi": sap,
+        "SEARCHAPI_SUCCESS": False,
         status: True,
         "FALLBACK_SERPER": True,
         "fallback": True,
+        "ofertas": len(fallback or []),
         "serper_timeouts": _SERPER_HTTP_STATS["timeouts"],
+        "serper": serper_diag,
     })
     print("[SearchApi] fallback=true")
     if fallback and usar_cache and not sem_cache:
