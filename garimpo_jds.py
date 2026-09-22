@@ -7200,6 +7200,108 @@ def _jds_html_anuncio(url):
     return corpo or ""
 
 
+def _jds_baixar_html_direto(url, timeout=12):
+    """GET cru da PDP. Não filtra utilidade; timeout/DNS devolvem vazio."""
+    if requests is None or not (url or "").strip():
+        return ""
+    try:
+        sess = _sessao_http()
+        resp = sess.get(url, headers=HEADERS_GOOGLE, timeout=timeout)
+        return resp.text or ""
+    except Exception:
+        return ""
+
+
+def _html_e_verificacao_mercadolivre(html):
+    """Página de tráfego suspeito/verificação do ML — não HTML vazio nem erro genérico."""
+    t = (html or "").lower()
+    if len(t) < 200:
+        return False
+    if "suspicious-traffic" in t:
+        return True
+    if "account-verification" in t and "para continuar, acesse" in t:
+        return True
+    return False
+
+
+def _consulta_do_item_confirmer(item, titulo=""):
+    if not isinstance(item, dict):
+        return ""
+    for chave in ("consulta", "termo", "q"):
+        v = str(item.get(chave) or "").strip()
+        if v:
+            return v
+    origem = item.get("listing_source") if isinstance(item.get("listing_source"), dict) else {}
+    for chave in ("consulta", "termo", "q"):
+        v = str(origem.get(chave) or "").strip()
+        if v:
+            return v
+    return str(titulo or item.get("titulo") or "").strip()
+
+
+def _searchapi_ml_antibot_estruturado_ok(item, pdp, titulo, preco, pais="BR"):
+    """Confirmação estruturada só anti-bot ML SearchApi. Não vale html_vazio genérico."""
+    if not isinstance(item, dict) or (item.get("fonte") or "") != "searchapi":
+        return False
+    pais = _normalizar_pais(pais or item.get("pais") or "BR")
+    if pais != "BR":
+        return False
+    plat = item.get("plataforma") or _plataforma_loja(pdp)
+    if plat != "mercado_livre" or plat not in _lojas_do_pais(pais):
+        return False
+    if not pdp or _url_e_google(pdp) or _link_e_google_shopping(pdp):
+        return False
+    if not _host_mercado_livre(pdp) or not _url_anuncio_exato(pdp, "mercado_livre"):
+        return False
+    origem = item.get("listing_source") if isinstance(item.get("listing_source"), dict) else None
+    if not origem:
+        return False
+    if not str(origem.get("product_token") or "").strip():
+        return False
+    tit_src = str(origem.get("titulo") or "").strip()
+    titulo = str(titulo or "").strip()
+    if not tit_src or not titulo or tit_src != titulo:
+        return False
+    if _titulo_usado(titulo) or _titulo_usado(tit_src):
+        return False
+    if _jds_texto_condicao(titulo) != "novo" or _jds_texto_condicao(tit_src) != "novo":
+        return False
+    if not _searchapi_preco_estruturado_ok(item, preco):
+        return False
+    url_src = str(origem.get("url") or "").strip()
+    if url_src:
+        if _url_e_google(url_src) or _link_e_google_shopping(url_src):
+            return False
+        if _url_anuncio_exato(url_src, "mercado_livre"):
+            if _jds_chave_anuncio_exato(url_src, "mercado_livre") != _jds_chave_anuncio_exato(pdp, "mercado_livre"):
+                return False
+    consulta = _consulta_do_item_confirmer(item, titulo)
+    if not _jds_anuncio_bate_consulta(consulta, titulo):
+        return False
+    if consulta and not _titulo_shopping_ok(consulta, titulo):
+        return False
+    cap_q = _jds_armazenamento_gb(consulta)
+    cap_t = _jds_armazenamento_gb(titulo)
+    if cap_q:
+        if not cap_t or cap_q.isdisjoint(cap_t):
+            return False
+    return True
+
+
+def _item_confirmado_searchapi_estruturado(item, pdp, titulo, preco, pais, foto):
+    saida = dict(item)
+    saida["confirmada_pagina"] = True
+    saida["confirmacao"] = "searchapi_structured_offer"
+    saida["original_url"] = pdp
+    saida["titulo"] = titulo
+    saida["preco_num"] = preco
+    saida["preco"] = _formatar_preco(preco, pais=pais)
+    if foto:
+        saida["foto"] = foto
+        saida["imagem"] = foto
+    return saida
+
+
 def _url_pdp_para_confirmar(item):
     """PDP sem tracking para baixar a página. Afiliado só depois da confirmação."""
     if not isinstance(item, dict):
@@ -7318,10 +7420,36 @@ def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None, motivos=None, 
         _anotar_rejeicao_confirmer(motivos, amostras, "titulo_rejeitado", item)
         return None
     if html is None:
+        baixar_custom = baixar is not None
         fn = baixar or _jds_html_anuncio
         html = fn(pdp) if callable(fn) else ""
+        if (
+            not html
+            and not baixar_custom
+            and plat == "mercado_livre"
+            and (item.get("fonte") or "") == "searchapi"
+        ):
+            bruto = _jds_baixar_html_direto(pdp)
+            if _html_e_verificacao_mercadolivre(bruto):
+                html = bruto
     if not html:
         _anotar_rejeicao_confirmer(motivos, amostras, "html_vazio", item)
+        return None
+    if plat == "mercado_livre" and _html_e_verificacao_mercadolivre(html):
+        if _searchapi_ml_antibot_estruturado_ok(item, pdp, titulo, preco, pais=pais):
+            return _item_confirmado_searchapi_estruturado(
+                item, pdp, titulo, preco, pais, foto,
+            )
+        if _titulo_usado(titulo):
+            _anotar_rejeicao_confirmer(motivos, amostras, "titulo_rejeitado", item)
+            return None
+        consulta = _consulta_do_item_confirmer(item, titulo)
+        cap_q = _jds_armazenamento_gb(consulta)
+        cap_t = _jds_armazenamento_gb(titulo)
+        if cap_q and (not cap_t or cap_q.isdisjoint(cap_t)):
+            _anotar_rejeicao_confirmer(motivos, amostras, "variante_nao_bate", item)
+            return None
+        _anotar_rejeicao_confirmer(motivos, amostras, "pagina_bloqueada", item)
         return None
     if _pagina_bloqueada(html):
         _anotar_rejeicao_confirmer(motivos, amostras, "pagina_bloqueada", item)
