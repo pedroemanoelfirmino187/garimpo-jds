@@ -74,8 +74,6 @@ Scraping no servidor é bloqueado. Cole as chaves em **Railway → Variables** (
 | eBay EUA | [Partner Network](https://partnernetwork.ebay.com) | `EBAY_EPN_CAMPAIGN_ID=5339211741`, `EBAY_EPN_CUSTOM_ID=5339211530` |
 | Google (SearchApi) | [searchapi.io](https://www.searchapi.io) | `SEARCHAPI_API_KEY` |
 | Google (Serper, fallback) | [serper.dev](https://serper.dev) | `SERPER_API_KEY` |
-| ZenRows (grátis) | [zenrows.com](https://www.zenrows.com) | `ZENROWS_API_KEY` |
-| ScrapingAnt (grátis) | [scrapingant.com](https://scrapingant.com) | `SCRAPINGANT_API_KEY` |
 
 No ar o motor pede o Google pela **SearchApi** (Shopping + Product Offers, no máximo 3 ofertas por busca). Sem `SEARCHAPI_API_KEY` cai no fallback **Serper**. A chave nunca vai para o app nem para o GitHub.
 

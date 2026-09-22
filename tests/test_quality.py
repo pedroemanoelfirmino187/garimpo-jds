@@ -177,6 +177,8 @@ def test_api_health():
     assert "serper" in data["chaves"]
     assert "searchapi" in data["chaves"]
     assert "cache_sqlite" in data["chaves"]
+    assert "zenrows" not in data["chaves"]
+    assert "scrapingant" not in data["chaves"]
 
 
 def test_api_get_garimpar_sem_chamada_externa():

@@ -194,6 +194,23 @@ def test_e_amazon_html_vazio_permanece_rejeitado():
     assert motivos2["pagina_bloqueada"] >= 1
 
 
+def test_e2_amazon_captcha_searchapi_nao_vira_estruturado():
+    item = _item_amazon()
+    html = (
+        "<html><body>To discuss automated access to Amazon data please contact "
+        "api-services-support@amazon.com. "
+        '<form action="/errors_page/validateCaptcha"></form>'
+        + ("x" * 200)
+        + "</body></html>"
+    )
+    motivos = sap._motivos_zerados()
+    ok = jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos)
+    assert ok is None
+    assert (ok or {}).get("confirmacao") != "searchapi_structured_offer"
+    assert motivos.get("pagina_bloqueada") >= 1
+    assert motivos.get("html_vazio", 0) == 0
+
+
 def test_f_shopee_html_vazio_permanece_rejeitado():
     item = _item_shopee()
     motivos = sap._motivos_zerados()
