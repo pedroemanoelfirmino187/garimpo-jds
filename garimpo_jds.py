@@ -2497,7 +2497,31 @@ def _zenrows_baixar(url):
     return ""
 
 
+_SCRAPINGANT_MAX_POR_BUSCA = 3
+_scrapingant_tls = threading.local()
+
+
+def _scrapingant_reset_busca():
+    """Estado só desta busca/thread — não persiste entre /garimpar."""
+    _scrapingant_tls.indisponivel = False
+    _scrapingant_tls.chamadas = 0
+
+
+def _scrapingant_st():
+    if not hasattr(_scrapingant_tls, "chamadas"):
+        _scrapingant_reset_busca()
+    return _scrapingant_tls
+
+
+def _scrapingant_pode_usar():
+    st = _scrapingant_st()
+    return (not st.indisponivel) and st.chamadas < _SCRAPINGANT_MAX_POR_BUSCA
+
+
 def _scrapingant_baixar(url, browser=True):
+    st = _scrapingant_st()
+    if st.indisponivel or st.chamadas >= _SCRAPINGANT_MAX_POR_BUSCA:
+        return ""
     chaves = _chaves_env(
         "SCRAPINGANT_API_KEY",
         "SCRAPING_ANT_KEY",
@@ -2508,6 +2532,9 @@ def _scrapingant_baixar(url, browser=True):
     if requests is None or not chaves:
         return ""
     for i, chave in enumerate(chaves, 1):
+        if st.indisponivel or st.chamadas >= _SCRAPINGANT_MAX_POR_BUSCA:
+            return ""
+        st.chamadas += 1
         try:
             resp = requests.get(
                 "https://api.scrapingant.com/v2/general",
@@ -2519,6 +2546,10 @@ def _scrapingant_baixar(url, browser=True):
                 },
                 timeout=28,
             )
+            if resp.status_code in (409, 429):
+                print(f"[ScrapingAnt] chave {i} HTTP {resp.status_code}")
+                st.indisponivel = True
+                return ""
             if resp.status_code >= 400:
                 print(f"[ScrapingAnt] chave {i} HTTP {resp.status_code}")
                 continue
@@ -2609,7 +2640,7 @@ def _sessao_http():
     return _SESSAO_HTTP
 
 
-def _baixar_url_loja(url, headers=None, timeout=8, browser=False, avisar=True):
+def _baixar_url_loja(url, headers=None, timeout=8, browser=False, avisar=True, usar_scrapingant=True):
     """Tenta direto; ZenRows/ScrapingAnt só se a chave existir."""
     if requests is None:
         return "", ""
@@ -2627,7 +2658,7 @@ def _baixar_url_loja(url, headers=None, timeout=8, browser=False, avisar=True):
             if avisar:
                 print("[Motor] página via ZenRows")
             return zen, "zenrows"
-    if _chaves_env(
+    if usar_scrapingant and _scrapingant_pode_usar() and _chaves_env(
         "SCRAPINGANT_API_KEY",
         "SCRAPING_ANT_KEY",
         "SCRAPINGANT_KEY",
@@ -7196,7 +7227,7 @@ def _jds_id_anuncio_na_pagina(url, plat, html):
 
 
 def _jds_html_anuncio(url):
-    corpo, _origem = _baixar_url_loja(url, timeout=12, avisar=False)
+    corpo, _origem = _baixar_url_loja(url, timeout=12, avisar=False, usar_scrapingant=False)
     return corpo or ""
 
 
@@ -7593,6 +7624,7 @@ def buscar_ofertas_serper_shopping(termo, usar_cache=True, limite=20, pais="BR")
     pais = _normalizar_pais(pais)
     if not t:
         return []
+    _scrapingant_reset_busca()
     sem_cache = (os.environ.get("JDS_BUSCA_SEM_CACHE") or "").strip() == "1"
     if usar_cache and not sem_cache:
         cached = _ler_cache_garimpo(t, pais=pais)
@@ -7654,6 +7686,7 @@ def buscar_ofertas_jds_shopping(termo, usar_cache=True, limite=20, pais="BR"):
         return []
     _SERPER_HTTP_STATS["timeouts"] = 0
     _SERPER_HTTP_STATS["errors"] = 0
+    _scrapingant_reset_busca()
     sem_cache = (os.environ.get("JDS_BUSCA_SEM_CACHE") or "").strip() == "1"
     if usar_cache and not sem_cache:
         cached = _ler_cache_garimpo(t, pais=pais)
