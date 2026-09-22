@@ -209,6 +209,57 @@ def test_e2_amazon_captcha_searchapi_nao_vira_estruturado():
     assert (ok or {}).get("confirmacao") != "searchapi_structured_offer"
     assert motivos.get("pagina_bloqueada") >= 1
     assert motivos.get("html_vazio", 0) == 0
+    assert jds._html_e_captcha_amazon(html) is True
+    assert jds._resposta_util_loja(AMZ, html) is False
+
+
+def test_e3_amazon_captcha_com_token_e_product_id_usa_estruturado():
+    item = _item_amazon()
+    item["listing_source"]["product_id"] = "gpid-amz-iphone"
+    html = (
+        "<html><body>To discuss automated access to Amazon data please contact "
+        "api-services-support@amazon.com. "
+        '<form action="/errors_page/validateCaptcha"></form>'
+        + ("x" * 200)
+        + "</body></html>"
+    )
+    assert jds._html_e_captcha_amazon(html) is True
+    assert jds._resposta_util_loja(AMZ, html) is False
+    motivos = sap._motivos_zerados()
+    ok = jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos)
+    assert ok is not None
+    assert ok["confirmacao"] == "searchapi_structured_offer"
+    assert ok["original_url"] == AMZ
+    assert ok["preco_num"] == 4776.77
+    assert ok["titulo"] == item["titulo"]
+    assert ok["titulo"] != (jds._jds_titulo_html_anuncio(html) or "captcha")
+    assert motivos.get("pagina_bloqueada", 0) == 0
+    assert "productTitle" not in html
+
+
+def test_e4_amazon_captcha_via_download_direto_quando_html_anuncio_vazio(monkeypatch):
+    item = _item_amazon()
+    item["listing_source"]["product_id"] = "gpid-amz-iphone"
+    html = (
+        "<html><body>To discuss automated access to Amazon data please contact "
+        "api-services-support@amazon.com. "
+        '<form action="/errors_page/validateCaptcha"></form>'
+        + ("x" * 200)
+        + "</body></html>"
+    )
+    monkeypatch.setattr(jds, "_jds_html_anuncio", lambda u: "")
+    monkeypatch.setattr(jds, "_jds_baixar_html_direto", lambda u, timeout=12: html)
+    ok = jds._jds_confirmar_oferta_na_pagina(item)
+    assert ok is not None
+    assert ok["confirmacao"] == "searchapi_structured_offer"
+
+
+def test_e5_amazon_html_vazio_sem_captcha_nao_vira_estruturado():
+    item = _item_amazon()
+    item["listing_source"]["product_id"] = "gpid-amz-iphone"
+    motivos = sap._motivos_zerados()
+    assert jds._jds_confirmar_oferta_na_pagina(item, html="", motivos=motivos) is None
+    assert motivos["html_vazio"] == 1
 
 
 def test_f_shopee_html_vazio_permanece_rejeitado():

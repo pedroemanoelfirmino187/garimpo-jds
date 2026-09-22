@@ -7130,6 +7130,18 @@ def _html_e_verificacao_mercadolivre(html):
     return False
 
 
+def _html_e_captcha_amazon(html):
+    """CAPTCHA/automated-access da Amazon. Não é PDP e não é html_vazio genérico."""
+    t = (html or "").lower()
+    if len(t) < 200:
+        return False
+    if "api-services-support@amazon.com" in t:
+        return True
+    if "/errors_page/validatecaptcha" in t:
+        return True
+    return False
+
+
 def _consulta_do_item_confirmer(item, titulo=""):
     if not isinstance(item, dict):
         return ""
@@ -7181,6 +7193,62 @@ def _searchapi_ml_antibot_estruturado_ok(item, pdp, titulo, preco, pais="BR"):
         if _url_anuncio_exato(url_src, "mercado_livre"):
             if _jds_chave_anuncio_exato(url_src, "mercado_livre") != _jds_chave_anuncio_exato(pdp, "mercado_livre"):
                 return False
+    consulta = _consulta_do_item_confirmer(item, titulo)
+    if not _jds_anuncio_bate_consulta(consulta, titulo):
+        return False
+    if consulta and not _titulo_shopping_ok(consulta, titulo):
+        return False
+    cap_q = _jds_armazenamento_gb(consulta)
+    cap_t = _jds_armazenamento_gb(titulo)
+    if cap_q:
+        if not cap_t or cap_q.isdisjoint(cap_t):
+            return False
+    return True
+
+
+def _searchapi_amazon_captcha_estruturado_ok(item, pdp, titulo, preco, pais="BR"):
+    """SearchApi Amazon só quando a PDP veio CAPTCHA. Não usa o HTML do desafio."""
+    if not isinstance(item, dict) or (item.get("fonte") or "") != "searchapi":
+        return False
+    pais = _normalizar_pais(pais or item.get("pais") or "BR")
+    plat = item.get("plataforma") or _plataforma_loja(pdp)
+    if plat != "amazon" or plat not in _lojas_do_pais(pais):
+        return False
+    if not pdp or _url_e_google(pdp) or _link_e_google_shopping(pdp) or _url_e_busca_loja(pdp):
+        return False
+    if not _url_anuncio_exato(pdp, "amazon"):
+        return False
+    if pais == "US":
+        if not _host_amazon_eua(pdp):
+            return False
+    elif "amazon.com.br" not in (pdp or "").lower():
+        return False
+    origem = item.get("listing_source") if isinstance(item.get("listing_source"), dict) else None
+    if not origem:
+        return False
+    if not str(origem.get("product_token") or "").strip():
+        return False
+    if not str(origem.get("product_id") or "").strip():
+        return False
+    tit_src = str(origem.get("titulo") or "").strip()
+    titulo = str(titulo or "").strip()
+    if not tit_src or not titulo or tit_src != titulo:
+        return False
+    if _titulo_usado(titulo) or _titulo_usado(tit_src):
+        return False
+    if _jds_texto_condicao(titulo) != "novo" or _jds_texto_condicao(tit_src) != "novo":
+        return False
+    if not _searchapi_preco_estruturado_ok(item, preco):
+        return False
+    url_src = str(origem.get("url") or "").strip()
+    if not url_src or _url_e_google(url_src) or _link_e_google_shopping(url_src) or _url_e_busca_loja(url_src):
+        return False
+    if not _url_anuncio_exato(url_src, "amazon"):
+        return False
+    if _jds_chave_anuncio_exato(url_src, "amazon") != _jds_chave_anuncio_exato(pdp, "amazon"):
+        return False
+    if not _asin_amazon(pdp):
+        return False
     consulta = _consulta_do_item_confirmer(item, titulo)
     if not _jds_anuncio_bate_consulta(consulta, titulo):
         return False
@@ -7332,12 +7400,16 @@ def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None, motivos=None, 
         if (
             not html
             and not baixar_custom
-            and plat == "mercado_livre"
             and (item.get("fonte") or "") == "searchapi"
         ):
-            bruto = _jds_baixar_html_direto(pdp)
-            if _html_e_verificacao_mercadolivre(bruto):
-                html = bruto
+            if plat == "mercado_livre":
+                bruto = _jds_baixar_html_direto(pdp)
+                if _html_e_verificacao_mercadolivre(bruto):
+                    html = bruto
+            elif plat == "amazon":
+                bruto = _jds_baixar_html_direto(pdp)
+                if _html_e_captcha_amazon(bruto):
+                    html = bruto
     if not html:
         _anotar_rejeicao_confirmer(motivos, amostras, "html_vazio", item)
         return None
@@ -7355,6 +7427,13 @@ def _jds_confirmar_oferta_na_pagina(item, html=None, baixar=None, motivos=None, 
         if cap_q and (not cap_t or cap_q.isdisjoint(cap_t)):
             _anotar_rejeicao_confirmer(motivos, amostras, "variante_nao_bate", item)
             return None
+        _anotar_rejeicao_confirmer(motivos, amostras, "pagina_bloqueada", item)
+        return None
+    if plat == "amazon" and _html_e_captcha_amazon(html):
+        if _searchapi_amazon_captcha_estruturado_ok(item, pdp, titulo, preco, pais=pais):
+            return _item_confirmado_searchapi_estruturado(
+                item, pdp, titulo, preco, pais, foto,
+            )
         _anotar_rejeicao_confirmer(motivos, amostras, "pagina_bloqueada", item)
         return None
     if _pagina_bloqueada(html):
