@@ -426,11 +426,11 @@ def test_a_searchapi_amazon_captcha_trilha_smart_tv_50(monkeypatch):
     tabela.append(("pipeline", "shopping_results", str(diag["shopping_results"]), ""))
     tabela.append(("pipeline", "candidates", str(diag["candidates"]), ""))
     tabela.append(("pipeline", "tokens", str(diag["candidatos_com_product_token"]), ""))
-    tabela.append(("pipeline", "product_offers", str(diag["product_offers_requests"]), "pdp_ja_no_shopping"))
+    tabela.append(("pipeline", "product_offers", str(diag["product_offers_requests"]), "amazon_pode_revalidar_pdp"))
     tabela.append(("pipeline", "offers_received", str(diag["offers_received"]), ""))
     assert diag["po_fila_candidatos"] == 3
-    assert diag["offers_received"] == 0
-    assert diag["product_offers_requests"] == 0
+    assert diag["offers_received"] == 1
+    assert diag["product_offers_requests"] == 1
     plats = {p["plataforma"] for p in ofertas_misto}
     assert "amazon" in plats
     assert status_misto == "SEARCHAPI_SUCCESS"
@@ -630,9 +630,122 @@ def test_h_po_fila_limita_a_3_mesmo_com_15_tokens(monkeypatch):
     assert diag["po_fila_candidatos"] == 3
     assert diag["po_fila_tokens_distintos"] == 3
     assert diag["searchapi_budget"] == 5
-    # Shopping já traz PDP Amazon: PO da mesma loja é pulado (_loja_tem_pdp_exato).
+    # Amazon com PDP exata continua elegível para Product Offers: a PDP pode
+    # falhar no confirmer (CAPTCHA/preço/variante) e ainda existir outra oferta
+    # Amazon válida dentro do mesmo orçamento.
     assert diag["candidates"] >= 12
-    assert diag["candidatos_com_product_token"] >= 12
+    assert diag["product_offers_requests"] >= 1
+
+
+def test_amazon_po_continua_apos_pdp_exata_e_pode_recuperar_outra_oferta(monkeypatch):
+    monkeypatch.setenv("SEARCHAPI_MAX_REQUESTS_PER_QUERY", "5")
+    monkeypatch.setenv("SEARCHAPI_MAX_PRODUCT_OFFERS", "3")
+
+    asin_ruim = "B0GSH89DG4"
+    asin_bom = "B0CQKLS4RP"
+    pdp_ruim = f"https://www.amazon.com.br/dp/{asin_ruim}"
+    pdp_bom = f"https://www.amazon.com.br/dp/{asin_bom}"
+
+    shopping = [
+        {
+            "position": 1,
+            "title": TITULO_TV,
+            "seller": "Amazon.com.br - Seller",
+            "extracted_price": 404.0,
+            "link": pdp_ruim,
+            "product_token": "tok-amz-404",
+            "product_id": "gpid-amz-1",
+        },
+        {
+            "position": 2,
+            "title": TITULO_TV,
+            "seller": "Amazon.com.br - Seller",
+            "extracted_price": PRECO_TV,
+            "link": pdp_bom,
+            "product_token": "tok-amz-1849",
+            "product_id": "gpid-amz-2",
+        },
+    ]
+
+    calls = []
+
+    def http_get(params):
+        calls.append(dict(params))
+        engine = params.get("engine")
+        if engine == "google_shopping":
+            return 200, {"shopping_results": shopping}, "{}"
+        if engine == "google_product_offers":
+            tok = params.get("product_token")
+            if tok == "tok-amz-404":
+                return 200, {
+                    "offers": [{
+                        "title": TITULO_TV,
+                        "extracted_price": 404.0,
+                        "link": pdp_ruim,
+                        "merchant": {"name": "Amazon.com.br"},
+                        "product_token": tok,
+                        "product_id": "gpid-amz-1",
+                    }]
+                }, "{}"
+            if tok == "tok-amz-1849":
+                return 200, {
+                    "offers": [{
+                        "title": TITULO_TV,
+                        "extracted_price": PRECO_TV,
+                        "link": pdp_bom,
+                        "merchant": {"name": "Amazon.com.br"},
+                        "product_token": tok,
+                        "product_id": "gpid-amz-2",
+                    }]
+                }, "{}"
+            return 200, {"offers": []}, "{}"
+        if engine == "amazon_product":
+            asin = str(params.get("asin") or "").upper()
+            if asin == asin_ruim:
+                return 200, {
+                    "product": {
+                        "asin": asin,
+                        "title": TITULO_TV,
+                        "extracted_price": 393.0,
+                        "condition": "Novo",
+                    }
+                }, "{}"
+            if asin == asin_bom:
+                return 200, {
+                    "product": {
+                        "asin": asin,
+                        "title": TITULO_TV,
+                        "extracted_price": PRECO_TV,
+                        "condition": "Novo",
+                    }
+                }, "{}"
+            return 404, {}, "{}"
+        if engine == "google_product_page":
+            return 200, {}, "{}"
+        raise AssertionError(engine)
+
+    ofertas, status = sap.buscar_ofertas_searchapi(
+        Q_TV,
+        pais="BR",
+        usar_cache=False,
+        http_get=http_get,
+        baixar=lambda _url: HTML_CAPTCHA_AMZ,
+        confirmar=True,
+    )
+
+    po_tokens = [
+        p.get("product_token")
+        for p in calls
+        if p.get("engine") == "google_product_offers"
+    ]
+    assert "tok-amz-404" in po_tokens
+    assert "tok-amz-1849" in po_tokens
+    assert len(calls) <= 5
+    assert status == "SEARCHAPI_SUCCESS"
+    assert any(
+        o.get("original_url") == pdp_bom and o.get("preco_num") == PRECO_TV
+        for o in ofertas
+    )
 
 
 def test_i_cadeia_etapas_aparecem_no_diag(monkeypatch):

@@ -451,7 +451,11 @@ CACHE_GARIMPO = Path(__file__).resolve().parent / "cache_garimpo.json"
 CACHE_GARIMPO_DB = Path(__file__).resolve().parent / "cache_garimpo.db"
 ARQ_DESEJOS = Path(__file__).resolve().parent / "desejos_jds.json"
 ARQ_PONTOS = Path(__file__).resolve().parent / "pontos_jds.json"
-CACHE_TTL_SEG = 2 * 3600
+# Preço de marketplace muda com frequência. O cache final da busca não pode
+# segurar uma oferta por horas, pois isso permite entregar um preço antigo
+# mesmo quando a loja já mudou o valor. 15 minutos reduz chamadas repetidas
+# sem transformar o resultado em um cache de longa duração.
+CACHE_TTL_SEG = 15 * 60
 _CACHE_LOCK = threading.Lock()
 _MEM_CACHE = {}
 INTERVALO_ALERTA_SEG = 15 * 60
@@ -2311,7 +2315,7 @@ def _copia_cache_lista(produtos):
 
 
 def _ler_cache_garimpo(termo, pais="BR"):
-    """Memória e SQLite antes da Serper. 2h, separado por termo+país."""
+    """Memória e SQLite antes da Serper. 15 min, separado por termo+país."""
     termo_n = _termo_cache_norm(termo)
     pais = _normalizar_pais(pais)
     if not termo_n:
@@ -2352,7 +2356,7 @@ def _ler_cache_garimpo(termo, pais="BR"):
 
 
 def _gravar_cache_garimpo(termo, produtos, pais="BR"):
-    """Salva o JSON da busca (termo + país) para não gastar Serper de novo em 2h."""
+    """Salva o JSON da busca (termo + país) por no máximo 15 min, evitando preço obsoleto."""
     termo_n = _termo_cache_norm(termo)
     pais = _normalizar_pais(pais)
     if not termo_n or not produtos:
@@ -5741,7 +5745,7 @@ def executar_testes_unitarios():
     _gravar_cache_garimpo("controle ps5", amostra, pais="BR")
     hit_br = _ler_cache_garimpo("Controle  PS5", pais="BR")
     hit_us = _ler_cache_garimpo("controle ps5", pais="US")
-    checar(hit_br and hit_br[0]["titulo"] == "DualSense cache", "SQLite acerta termo+país BR em 2h")
+    checar(hit_br and hit_br[0]["titulo"] == "DualSense cache", "SQLite acerta termo+país BR em 15 min")
     checar(not hit_us, "SQLite não mistura busca BR com US")
     os.environ.pop("CACHE_GARIMPO_DB", None)
     checar(not _preco_plausivel(
@@ -7578,7 +7582,7 @@ def _jds_confirmar_listings(
     return final
 
 
-def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR"):
+def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR", deduplicar_lojas=True):
     """Só ofertas já na lista da Serper, com URL de anúncio. Não busca loja extra."""
     xs = [
         p for p in (candidatos or [])
@@ -7594,6 +7598,8 @@ def _jds_comparar_mesmo_produto(consulta, candidatos, pais="BR"):
     if not xs:
         return []
     grupo = _jds_maior_grupo_identico(consulta, xs)
+    if not deduplicar_lojas:
+        return list(grupo or [])
     por_loja = {}
     for p in grupo or []:
         plat = p.get("plataforma")

@@ -1486,7 +1486,11 @@ def buscar_ofertas_searchapi(
             return
         tokens_vistos.add(tok)
         plat = cand.get("plataforma") or ""
-        if plat and _loja_tem_pdp_exato(itens, plat):
+        # Amazon pode ter PDP exata no Shopping e ainda assim falhar no confirmer
+        # (ex.: CAPTCHA ou preco/variante divergente). Nesse caso, precisamos consultar
+        # outras ofertas do mesmo produto via Product Offers dentro do mesmo orçamento.
+        # As demais lojas mantêm o atalho original para não gastar chamadas desnecessárias.
+        if plat and plat != "amazon" and _loja_tem_pdp_exato(itens, plat):
             return
         chave_off = f"off:{cfg['pais']}:{cfg['hl']}:{_hash_token(tok)}"
         payload = None
@@ -1617,7 +1621,9 @@ def buscar_ofertas_searchapi(
     )
 
     apos_parser = len(itens)
-    grupo = jds._jds_comparar_mesmo_produto(t, itens, pais=pais)
+    grupo = jds._jds_comparar_mesmo_produto(
+        t, itens, pais=pais, deduplicar_lojas=not confirmar,
+    )
     apos_matcher = len(grupo or [])
     confirmer_entrada = apos_matcher if confirmar else 0
     if confirmar:
@@ -1632,6 +1638,11 @@ def buscar_ofertas_searchapi(
     grupo = [p for p in (grupo or []) if validar_integridade_listing(p) or p.get("fonte") != "searchapi"]
     confirmados = []
     for p in grupo or []:
+        # Mantém o preço da oferta confirmada pelo Google Product Offers.
+        # Não substituir por amazon_product aqui: esse endpoint é de produto/PDP
+        # e não garante a mesma oferta/vendedor do listing já confirmado.
+        # Além disso, consumir uma chamada extra nesta etapa pode retirar orçamento
+        # do fluxo US/eBay.
         orig = p.get("original_url") or (p.get("listing_source") or {}).get("url")
         if p.get("fonte") == "searchapi" and not validar_integridade_listing(
             {**p, "original_url": orig}

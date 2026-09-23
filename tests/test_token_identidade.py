@@ -121,8 +121,10 @@ def test_shopping_com_pdp_asin_a_pula_po_nao_mistura_asin_b(monkeypatch):
         Q, pais="BR", usar_cache=False, http_get=http_get,
         baixar=lambda u: HTML_CAPTCHA_AMZ, confirmar=False,
     )
-    assert visto_po == []
-    assert sap.ultimo_diag_searchapi()["product_offers_requests"] == 0
+    # Amazon pode consultar Product Offers mesmo com PDP exata no Shopping;
+    # a oferta de outro ASIN deve continuar rejeitada pela identidade.
+    assert len(visto_po) == 1
+    assert sap.ultimo_diag_searchapi()["product_offers_requests"] == 1
     assert result
     assert all(jds._asin_amazon(p["original_url"]) == ASIN_OK for p in result)
     assert all(jds._asin_amazon(p["original_url"]) != ASIN_OUTRO for p in result)
