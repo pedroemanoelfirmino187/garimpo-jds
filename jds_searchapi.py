@@ -854,6 +854,237 @@ def _item_estruturado_ebay_product(dados):
     return item
 
 
+_AMZ_PROD_DIAG = {
+    "amazon_product_requests": 0,
+    "amazon_product_cache_hits": 0,
+    "amazon_product_confirmed": 0,
+    "amazon_product_rejected": 0,
+    "amazon_product_rejection_reason": "",
+}
+
+
+def _amazon_product_diag_zerado():
+    return {
+        "amazon_product_requests": 0,
+        "amazon_product_cache_hits": 0,
+        "amazon_product_confirmed": 0,
+        "amazon_product_rejected": 0,
+        "amazon_product_rejection_reason": "",
+    }
+
+
+def _reset_amazon_product_diag():
+    _AMZ_PROD_DIAG.clear()
+    _AMZ_PROD_DIAG.update(_amazon_product_diag_zerado())
+
+
+def _amazon_domain(pais="BR"):
+    if jds._normalizar_pais(pais) == "US":
+        return "amazon.com"
+    return "amazon.com.br"
+
+
+def _preco_amazon_product(prod, pais="BR"):
+    if not isinstance(prod, dict):
+        return 0.0
+    for bruto in (
+        prod.get("extracted_price"),
+        prod.get("extracted_total_price"),
+    ):
+        try:
+            n = float(bruto)
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            pass
+    buybox = prod.get("buybox") if isinstance(prod.get("buybox"), dict) else {}
+    for bloco in (buybox.get("price"), prod.get("price")):
+        if isinstance(bloco, dict):
+            try:
+                n = float(bloco.get("value"))
+                if n > 0:
+                    return n
+            except (TypeError, ValueError):
+                pass
+            n = jds._preco_para_numero(str(bloco.get("raw") or ""), pais=pais)
+            if n > 0:
+                return n
+        elif isinstance(bloco, (int, float)):
+            if float(bloco) > 0:
+                return float(bloco)
+        elif isinstance(bloco, str):
+            n = jds._preco_para_numero(bloco, pais=pais)
+            if n > 0:
+                return n
+    return 0.0
+
+
+def _texto_identidade_amazon_product(prod):
+    """Título + atributos/especificações. Sem bullets de marketing."""
+    partes = [str(prod.get("title") or "")]
+    for chave in ("attributes", "specifications"):
+        bloco = prod.get(chave)
+        if not isinstance(bloco, list):
+            continue
+        for row in bloco[:24]:
+            if isinstance(row, dict):
+                partes.append(str(row.get("name") or ""))
+                partes.append(str(row.get("value") or ""))
+            else:
+                partes.append(str(row))
+    return " ".join(p for p in partes if p)
+
+
+def _searchapi_amazon_product_por_asin(asin, pais="BR", usar_cache=True, http_get=None, orcamento=None):
+    asin = str(asin or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{10}", asin):
+        return None, 0, False
+    pais = jds._normalizar_pais(pais)
+    chave = f"amzp:{pais}:{asin}"
+    if usar_cache:
+        cached = _ler_cache(chave, _ttl_offers())
+        if isinstance(cached, dict):
+            _AMZ_PROD_DIAG["amazon_product_cache_hits"] += 1
+            return cached, 0, True
+    http, dados, bruto = _pedir_searchapi(
+        {
+            "engine": "amazon_product",
+            "asin": asin,
+            "amazon_domain": _amazon_domain(pais),
+        },
+        http_get=http_get,
+        orcamento=orcamento,
+    )
+    if bruto == "orcamento":
+        return None, 0, False
+    _AMZ_PROD_DIAG["amazon_product_requests"] += 1
+    if bruto == "timeout" or http >= 400 or not isinstance(dados, dict):
+        return None, 1, False
+    prod = dados.get("product")
+    if not isinstance(prod, dict):
+        return None, 1, False
+    if usar_cache:
+        _gravar_cache(chave, dados)
+    return dados, 1, False
+
+
+def confirmar_item_amazon_product_captcha(
+    item,
+    pdp="",
+    pais="BR",
+    usar_cache=True,
+    http_get=None,
+    motivos=None,
+    amostras=None,
+    orcamento=None,
+):
+    """CAPTCHA Amazon → SearchApi amazon_product. O HTML do desafio não é PDP."""
+    def _falha(motivo):
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = motivo
+        jds._anotar_rejeicao_confirmer(motivos, amostras, motivo, item if isinstance(item, dict) else {})
+        return None, 0
+
+    if not isinstance(item, dict) or (item.get("fonte") or "") != "searchapi":
+        return _falha("pagina_bloqueada")
+    pais = jds._normalizar_pais(pais or item.get("pais") or "BR")
+    pdp = pdp or jds._url_pdp_para_confirmar(item)
+    asin = jds._asin_de_pdp_amazon(pdp)
+    if not asin:
+        return _falha("id_nao_encontrado")
+    dados, nreq, _cache = _searchapi_amazon_product_por_asin(
+        asin, pais=pais, usar_cache=usar_cache, http_get=http_get, orcamento=orcamento,
+    )
+    prod = dados.get("product") if isinstance(dados, dict) else None
+    if not isinstance(prod, dict):
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "confirmer_rejeitou"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "confirmer_rejeitou", item)
+        return None, nreq
+    asin_p = str(prod.get("asin") or "").strip().upper()
+    if not asin_p:
+        asin_p = jds._asin_amazon(str(prod.get("link") or ""))
+    if asin_p != asin:
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "id_nao_encontrado"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "id_nao_encontrado", item)
+        return None, nreq
+    titulo_p = str(prod.get("title") or "").strip()
+    if not titulo_p:
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "titulo_rejeitado"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "titulo_rejeitado", item)
+        return None, nreq
+    if jds._titulo_usado(titulo_p) or jds._jds_texto_condicao(titulo_p) != "novo":
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "condicao_nao_bate"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "condicao_nao_bate", item)
+        return None, nreq
+    titulo_c = str(item.get("titulo") or "").strip()
+    consulta = jds._consulta_do_item_confirmer(item, titulo_c)
+    ident = _texto_identidade_amazon_product(prod)
+    cap_q = jds._jds_armazenamento_gb(consulta)
+    cap_p = jds._jds_armazenamento_gb(ident)
+    if cap_q:
+        if not cap_p or cap_q.isdisjoint(cap_p) or (cap_p - cap_q):
+            _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+            _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "variante_nao_bate"
+            jds._anotar_rejeicao_confirmer(motivos, amostras, "variante_nao_bate", item)
+            return None, nreq
+    if not jds._jds_anuncio_bate_consulta(consulta, titulo_p):
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "matcher_rejeitou"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "matcher_rejeitou", item)
+        return None, nreq
+    if consulta and not jds._titulo_shopping_ok(consulta, titulo_p):
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "titulo_rejeitado"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "titulo_rejeitado", item)
+        return None, nreq
+    if not jds._jds_mesmo_produto(titulo_c, titulo_p, consulta):
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "matcher_rejeitou"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "matcher_rejeitou", item)
+        return None, nreq
+    if ident != titulo_p and not jds._jds_mesmo_produto(titulo_c, ident, consulta):
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "variante_nao_bate"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "variante_nao_bate", item)
+        return None, nreq
+    if not jds._jds_variante_bate(titulo_c, titulo_p):
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "variante_nao_bate"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "variante_nao_bate", item)
+        return None, nreq
+    if ident != titulo_p and not jds._jds_variante_bate(titulo_c, ident):
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "variante_nao_bate"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "variante_nao_bate", item)
+        return None, nreq
+    preco_p = _preco_amazon_product(prod, pais=pais)
+    if preco_p <= 0:
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "preco_nao_encontrado"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "preco_nao_encontrado", item)
+        return None, nreq
+    try:
+        claimed = float(item.get("preco_num") or 0)
+    except (TypeError, ValueError):
+        claimed = 0.0
+    if claimed <= 0 or abs(claimed - preco_p) > 0.01:
+        _AMZ_PROD_DIAG["amazon_product_rejected"] += 1
+        _AMZ_PROD_DIAG["amazon_product_rejection_reason"] = "preco_nao_confere"
+        jds._anotar_rejeicao_confirmer(motivos, amostras, "preco_nao_confere", item)
+        return None, nreq
+    foto = str(item.get("foto") or item.get("imagem") or "").strip()
+    ok = jds._item_confirmado_searchapi_estruturado(
+        item, pdp, titulo_c, claimed, pais, foto,
+    )
+    ok["confirmacao"] = "searchapi_structured_offer"
+    _AMZ_PROD_DIAG["amazon_product_confirmed"] += 1
+    return ok, nreq
+
+
 def confirmar_item_ebay_product(
     query,
     item,
@@ -1105,8 +1336,9 @@ def buscar_ofertas_searchapi(
     t = _consulta_norm(termo)
     pais = jds._normalizar_pais(pais)
     cfg = _cfg_pais(pais)
+    _reset_amazon_product_diag()
     if not t:
-        _diag(status="SEARCHAPI_EMPTY", q=t, pais=pais)
+        _diag(status="SEARCHAPI_EMPTY", q=t, pais=pais, **_amazon_product_diag_zerado())
         return [], "SEARCHAPI_EMPTY"
 
     orcamento = _OrcamentoSearchApi()
@@ -1125,6 +1357,7 @@ def buscar_ofertas_searchapi(
             "searchapi_requests": orcamento.usado,
             "searchapi_engines": list(orcamento.engines),
             "etapas_fluxo": list(fluxo),
+            **dict(_AMZ_PROD_DIAG),
         }
 
     chave_shop = "shop:" + chave_cache_searchapi(t, pais)
@@ -1390,6 +1623,7 @@ def buscar_ofertas_searchapi(
     if confirmar:
         grupo = jds._jds_confirmar_listings(
             grupo, pais=pais, baixar=baixar, motivos=motivos, amostras=amostras,
+            http_get=http_get, orcamento=orcamento, usar_cache=usar_cache,
         )
     else:
         grupo = jds._ordenar_entrega_menor_preco(

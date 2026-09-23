@@ -247,6 +247,20 @@ def _http_get_tv(shopping, offers_por_token):
             return 200, offers_por_token.get(tok, {"offers": []}), "{}"
         if engine == "google_product_page":
             return 200, {}, "{}"
+        if engine == "amazon_product":
+            asin = str(params.get("asin") or "").upper()
+            assert params.get("amazon_domain") == "amazon.com.br"
+            assert "api_key" not in params
+            if asin == "B0GSH89DG4":
+                return 200, {
+                    "product": {
+                        "asin": asin,
+                        "title": TITULO_TV,
+                        "extracted_price": PRECO_TV,
+                        "condition": "Novo",
+                    }
+                }, "{}"
+            return 404, {}, "{}"
         return 0, None, "engine_nao_usado"
 
     return _get
@@ -368,7 +382,11 @@ def test_a_searchapi_amazon_captcha_trilha_smart_tv_50(monkeypatch):
 
     motivos = sap._motivos_zerados()
     ok = jds._jds_confirmar_oferta_na_pagina(
-        item, html=HTML_CAPTCHA_AMZ, motivos=motivos,
+        item,
+        html=HTML_CAPTCHA_AMZ,
+        motivos=motivos,
+        http_get=_http_get_tv(shopping, _offers_tv()),
+        usar_cache=False,
     )
     assert ok is not None
     assert ok["confirmacao"] == "searchapi_structured_offer"
@@ -382,11 +400,16 @@ def test_a_searchapi_amazon_captcha_trilha_smart_tv_50(monkeypatch):
     sem_id = sap.offer_para_item(Q_TV, _offers_tv()["tok-amz-tv"]["offers"][0], pais="BR")
     sem_id["listing_source"]["product_id"] = ""
     motivos2 = sap._motivos_zerados()
-    assert jds._jds_confirmar_oferta_na_pagina(
-        sem_id, html=HTML_CAPTCHA_AMZ, motivos=motivos2,
-    ) is None
-    assert motivos2["pagina_bloqueada"] >= 1
-    tabela.append(("Amazon_sem_product_id", "confirmer", "REJEITADA", "pagina_bloqueada"))
+    ok_sem = jds._jds_confirmar_oferta_na_pagina(
+        sem_id,
+        html=HTML_CAPTCHA_AMZ,
+        motivos=motivos2,
+        http_get=_http_get_tv(shopping, _offers_tv()),
+        usar_cache=False,
+    )
+    assert ok_sem is not None
+    assert ok_sem["confirmacao"] == "searchapi_structured_offer"
+    tabela.append(("Amazon_sem_product_id", "confirmer", "OK", "asin_amazon_product"))
 
     def _baixar_misto(url):
         if "amazon.com.br" in url:
@@ -421,9 +444,15 @@ def test_a_searchapi_amazon_captcha_trilha_smart_tv_50(monkeypatch):
 def test_a2_captcha_nao_e_html_valido_sem_provas():
     item = _item_tv("amazon", token="tok-amz-tv", pid="")
     motivos = sap._motivos_zerados()
-    ok = jds._jds_confirmar_oferta_na_pagina(item, html=HTML_CAPTCHA_AMZ, motivos=motivos)
+
+    def http_get(params):
+        return 503, {}, "{}"
+
+    ok = jds._jds_confirmar_oferta_na_pagina(
+        item, html=HTML_CAPTCHA_AMZ, motivos=motivos, http_get=http_get, usar_cache=False,
+    )
     assert ok is None
-    assert motivos["pagina_bloqueada"] >= 1
+    assert motivos.get("confirmer_rejeitou", 0) >= 1
     assert jds._resposta_util_loja(PDP_AMZ, HTML_CAPTCHA_AMZ) is False
 
 
@@ -566,7 +595,13 @@ def test_g_hipotese_bloqueio_vs_pagina_inexistente():
     motivos_cap = sap._motivos_zerados()
     motivos_404 = sap._motivos_zerados()
     motivos_vazio = sap._motivos_zerados()
-    ok_cap = jds._jds_confirmar_oferta_na_pagina(item, html=HTML_CAPTCHA_AMZ, motivos=motivos_cap)
+    ok_cap = jds._jds_confirmar_oferta_na_pagina(
+        item,
+        html=HTML_CAPTCHA_AMZ,
+        motivos=motivos_cap,
+        http_get=_http_get_tv(_shopping_tv(), _offers_tv()),
+        usar_cache=False,
+    )
     assert ok_cap is not None
     assert ok_cap["confirmacao"] == "searchapi_structured_offer"
     assert jds._jds_confirmar_oferta_na_pagina(item, html=HTML_404_GENERICO, motivos=motivos_404) is None

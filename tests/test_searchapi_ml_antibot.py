@@ -204,18 +204,41 @@ def test_e2_amazon_captcha_searchapi_nao_vira_estruturado():
         + "</body></html>"
     )
     motivos = sap._motivos_zerados()
-    ok = jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos)
+
+    def http_get(params):
+        return 503, {}, "{}"
+
+    ok = jds._jds_confirmar_oferta_na_pagina(
+        item, html=html, motivos=motivos, http_get=http_get, usar_cache=False,
+    )
     assert ok is None
     assert (ok or {}).get("confirmacao") != "searchapi_structured_offer"
-    assert motivos.get("pagina_bloqueada") >= 1
+    assert motivos.get("confirmer_rejeitou", 0) >= 1
     assert motivos.get("html_vazio", 0) == 0
     assert jds._html_e_captcha_amazon(html) is True
     assert jds._resposta_util_loja(AMZ, html) is False
 
 
-def test_e3_amazon_captcha_com_token_e_product_id_usa_estruturado():
+def _http_iphone_amz(preco=4776.77, asin="B0CQKLS4RP", gb="128GB"):
+    def http_get(params):
+        assert params.get("engine") == "amazon_product"
+        assert params.get("asin") == asin
+        assert "api_key" not in params
+        return 200, {
+            "product": {
+                "asin": asin,
+                "title": "Apple iPhone 15 128GB Preto",
+                "extracted_price": preco,
+                "condition": "Novo",
+                "specifications": [{"name": "Capacidade de armazenamento", "value": gb}],
+            }
+        }, "{}"
+
+    return http_get
+
+
+def test_e3_amazon_captcha_com_amazon_product_usa_estruturado():
     item = _item_amazon()
-    item["listing_source"]["product_id"] = "gpid-amz-iphone"
     html = (
         "<html><body>To discuss automated access to Amazon data please contact "
         "api-services-support@amazon.com. "
@@ -226,7 +249,9 @@ def test_e3_amazon_captcha_com_token_e_product_id_usa_estruturado():
     assert jds._html_e_captcha_amazon(html) is True
     assert jds._resposta_util_loja(AMZ, html) is False
     motivos = sap._motivos_zerados()
-    ok = jds._jds_confirmar_oferta_na_pagina(item, html=html, motivos=motivos)
+    ok = jds._jds_confirmar_oferta_na_pagina(
+        item, html=html, motivos=motivos, http_get=_http_iphone_amz(), usar_cache=False,
+    )
     assert ok is not None
     assert ok["confirmacao"] == "searchapi_structured_offer"
     assert ok["original_url"] == AMZ
@@ -239,7 +264,6 @@ def test_e3_amazon_captcha_com_token_e_product_id_usa_estruturado():
 
 def test_e4_amazon_captcha_via_download_direto_quando_html_anuncio_vazio(monkeypatch):
     item = _item_amazon()
-    item["listing_source"]["product_id"] = "gpid-amz-iphone"
     html = (
         "<html><body>To discuss automated access to Amazon data please contact "
         "api-services-support@amazon.com. "
@@ -249,7 +273,9 @@ def test_e4_amazon_captcha_via_download_direto_quando_html_anuncio_vazio(monkeyp
     )
     monkeypatch.setattr(jds, "_jds_html_anuncio", lambda u: "")
     monkeypatch.setattr(jds, "_jds_baixar_html_direto", lambda u, timeout=12: html)
-    ok = jds._jds_confirmar_oferta_na_pagina(item)
+    ok = jds._jds_confirmar_oferta_na_pagina(
+        item, http_get=_http_iphone_amz(), usar_cache=False,
+    )
     assert ok is not None
     assert ok["confirmacao"] == "searchapi_structured_offer"
 
