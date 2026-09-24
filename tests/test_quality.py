@@ -603,20 +603,90 @@ def test_limite_de_buscas_no_railway(monkeypatch):
     assert terceiro.status_code == 429
 
 
-def test_pc_com_searchapi_sem_serper_entra_no_motor(monkeypatch):
-    monkeypatch.delenv("SERPER_API_KEY", raising=False)
-    monkeypatch.delenv("SERPER_KEY", raising=False)
-    monkeypatch.setenv("SEARCHAPI_API_KEY", "simulada")
+def _rota_flet(monkeypatch, searchapi=None, serper=None, searchapi_ofertas=None):
+    """Espia as funções reais. Não substitui o roteamento do Flet."""
+    import jds_searchapi as sap
+
+    for nome in ("SEARCHAPI_API_KEY", "SEARCHAPI_KEY", "SERPER_API_KEY", "SERPER_KEY"):
+        monkeypatch.delenv(nome, raising=False)
+    if searchapi:
+        monkeypatch.setenv("SEARCHAPI_API_KEY", searchapi)
+    if serper:
+        monkeypatch.setenv("SERPER_API_KEY", serper)
+    monkeypatch.setattr(jds, "JDS_API_URL", "")
     monkeypatch.setattr(jds, "_ler_cache_garimpo", lambda *a, **k: None)
     monkeypatch.setattr(jds, "_gravar_cache_garimpo", lambda *a, **k: None)
     oferta = _oferta_amazon("Fone de Ouvido Bluetooth JBL Tune 520BT", 228.38, "B0C6SPNVF5")
-    chamadas = {"n": 0}
+    chamadas = []
+    shopping_original = jds.buscar_ofertas_jds_shopping
+    serper_wrap_original = jds._buscar_ofertas_serper
 
-    def shopping(termo, usar_cache=True, limite=20, pais="BR"):
-        chamadas["n"] += 1
+    def shopping(*args, **kwargs):
+        chamadas.append("buscar_ofertas_jds_shopping")
+        return shopping_original(*args, **kwargs)
+
+    def serper_wrap(*args, **kwargs):
+        chamadas.append("_buscar_ofertas_serper")
+        return serper_wrap_original(*args, **kwargs)
+
+    def searchapi_fn(*args, **kwargs):
+        chamadas.append("buscar_ofertas_searchapi")
+        if searchapi_ofertas is None:
+            return [oferta], "SEARCHAPI_SUCCESS"
+        return list(searchapi_ofertas), "SEARCHAPI_SUCCESS" if searchapi_ofertas else "SEARCHAPI_EMPTY"
+
+    def serper_fn(*args, **kwargs):
+        chamadas.append("buscar_ofertas_serper_shopping")
         return [oferta]
 
     monkeypatch.setattr(jds, "buscar_ofertas_jds_shopping", shopping)
-    lista = jds.buscar_ofertas_por_pais("zzz simulacao sem serper", usar_cache=False, usar_vivo=True)
-    assert chamadas["n"] == 1
+    monkeypatch.setattr(jds, "_buscar_ofertas_serper", serper_wrap)
+    monkeypatch.setattr(sap, "buscar_ofertas_searchapi", searchapi_fn)
+    monkeypatch.setattr(jds, "buscar_ofertas_serper_shopping", serper_fn)
+    lista = jds.buscar_ofertas_jds("zzz rota flet local")
+    return chamadas, lista
+
+
+def test_flet_so_searchapi_chama_shopping_e_nao_serper(monkeypatch):
+    chamadas, lista = _rota_flet(monkeypatch, searchapi="chave-searchapi")
+    assert "buscar_ofertas_jds_shopping" in chamadas
+    assert "buscar_ofertas_searchapi" in chamadas
+    assert "_buscar_ofertas_serper" not in chamadas
+    assert "buscar_ofertas_serper_shopping" not in chamadas
     assert lista and lista[0]["preco_num"] == pytest.approx(228.38)
+
+
+def test_flet_so_serper_nao_chama_searchapi(monkeypatch):
+    chamadas, lista = _rota_flet(monkeypatch, serper="chave-serper")
+    assert "buscar_ofertas_serper_shopping" in chamadas
+    assert "buscar_ofertas_jds_shopping" not in chamadas
+    assert "buscar_ofertas_searchapi" not in chamadas
+    assert "_buscar_ofertas_serper" not in chamadas
+    assert lista and lista[0]["preco_num"] == pytest.approx(228.38)
+
+
+def test_flet_searchapi_com_oferta_nao_cai_no_serper(monkeypatch):
+    chamadas, _lista = _rota_flet(monkeypatch, searchapi="chave-searchapi", serper="chave-serper")
+    assert chamadas[0] == "buscar_ofertas_jds_shopping"
+    assert "buscar_ofertas_searchapi" in chamadas
+    assert "buscar_ofertas_serper_shopping" not in chamadas
+    assert "_buscar_ofertas_serper" not in chamadas
+
+
+def test_flet_searchapi_vazia_cai_no_serper(monkeypatch):
+    chamadas, lista = _rota_flet(
+        monkeypatch, searchapi="chave-searchapi", serper="chave-serper", searchapi_ofertas=[],
+    )
+    assert "buscar_ofertas_jds_shopping" in chamadas
+    assert "buscar_ofertas_searchapi" in chamadas
+    assert "buscar_ofertas_serper_shopping" in chamadas
+    assert "_buscar_ofertas_serper" not in chamadas
+    assert lista and lista[0]["preco_num"] == pytest.approx(228.38)
+    assert all((p.get("fonte") or "") != "catalogo" for p in lista)
+
+
+def test_flet_sem_chaves_nao_chama_motor_online(monkeypatch):
+    chamadas, lista = _rota_flet(monkeypatch)
+    assert chamadas == []
+    assert all((p.get("fonte") or "") != "searchapi" for p in lista)
+    assert all((p.get("fonte") or "") != "serper" for p in lista)

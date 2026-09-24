@@ -3957,8 +3957,15 @@ def gerar_lista_ofertas_reais(
                 print(f"[Motor] cache instantâneo: {lista[0]['preco']} em {lista[0].get('loja')}")
                 return lista
 
-    if usar_vivo and _tem_motor_busca():
-        ofertas = _buscar_ofertas_serper(termo, limite=20, pais=pais)
+    if usar_vivo and _chaves_env("SEARCHAPI_API_KEY", "SEARCHAPI_KEY"):
+        ofertas = buscar_ofertas_jds_shopping(termo, usar_cache=usar_cache, limite=20, pais=pais)
+        ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
+        if ofertas and usar_cache:
+            _gravar_cache_garimpo(termo, ofertas, pais=pais)
+        return ofertas
+
+    if usar_vivo and _chave_serper():
+        ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=usar_cache, limite=20, pais=pais)
         ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
         if ofertas and usar_cache:
             _gravar_cache_garimpo(termo, ofertas, pais=pais)
