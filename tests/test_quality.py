@@ -695,5 +695,112 @@ def test_flet_sem_chaves_nao_chama_motor_online(monkeypatch):
 def test_tune_520_a_11_dolares_nao_e_preco_plausivel():
     titulo = "JBL Tune 520BT Wireless On-Ear Bluetooth Headphones Black"
     assert jds._preco_plausivel("jbl tune 520bt", 11.95, titulo, pais="US") is False
+    assert jds._preco_plausivel("jbl tune 520bt", 25.00, titulo, pais="US") is True
     assert jds._preco_plausivel("jbl tune 520bt", 34.95, titulo, pais="US") is True
     assert jds._preco_plausivel("jbl tune 520bt", 228.38, "Fone de Ouvido JBL Tune 520BT", pais="BR") is True
+
+
+def test_piso_fone_so_quando_o_produto_e_fone():
+    fone = "JBL Tune 520BT Wireless On-Ear Bluetooth Headphones Black"
+    assert jds._texto_eh_produto_fone(fone) is True
+    assert jds._faixa_preco("jbl tune 520bt", pais="US", titulo=fone)[0] == 25.0
+    tv = "Smart TV 55 4K com fones de ouvido inclusos e headphones included"
+    assert jds._texto_eh_produto_fone(tv) is False
+    assert jds._faixa_preco("smart tv 55", pais="US", titulo=tv)[0] != 25.0
+    mesa = "Mesa Gamer com suporte para headset e porta USB"
+    assert jds._texto_eh_produto_fone(mesa) is False
+    assert jds._faixa_preco("mesa gamer", pais="BR", titulo=mesa)[0] != 80.0
+    note = "Notebook 16 GB com entrada para headphones e headphone jack"
+    assert jds._texto_eh_produto_fone(note) is False
+    assert jds._faixa_preco("notebook", pais="US", titulo=note)[0] != 25.0
+
+
+def _rota_por_pais(monkeypatch, searchapi=None, serper=None, searchapi_ofertas=None):
+    import jds_searchapi as sap
+
+    for nome in ("SEARCHAPI_API_KEY", "SEARCHAPI_KEY", "SERPER_API_KEY", "SERPER_KEY"):
+        monkeypatch.delenv(nome, raising=False)
+    if searchapi:
+        monkeypatch.setenv("SEARCHAPI_API_KEY", searchapi)
+    if serper:
+        monkeypatch.setenv("SERPER_API_KEY", serper)
+    monkeypatch.setattr(jds, "_ler_cache_garimpo", lambda *a, **k: None)
+    monkeypatch.setattr(jds, "_gravar_cache_garimpo", lambda *a, **k: None)
+    oferta = _oferta_amazon("Fone de Ouvido Bluetooth JBL Tune 520BT", 228.38, "B0C6SPNVF5")
+    chamadas = []
+
+    def searchapi_fn(*args, **kwargs):
+        chamadas.append("buscar_ofertas_searchapi")
+        if searchapi_ofertas is None:
+            return [oferta], "SEARCHAPI_SUCCESS"
+        return list(searchapi_ofertas), "SEARCHAPI_SUCCESS" if searchapi_ofertas else "SEARCHAPI_EMPTY"
+
+    def serper_fn(*args, **kwargs):
+        chamadas.append("buscar_ofertas_serper_shopping")
+        return [oferta]
+
+    def serper_direto(*args, **kwargs):
+        chamadas.append("_buscar_ofertas_serper")
+        return [oferta]
+
+    monkeypatch.setattr(sap, "buscar_ofertas_searchapi", searchapi_fn)
+    monkeypatch.setattr(jds, "buscar_ofertas_serper_shopping", serper_fn)
+    monkeypatch.setattr(jds, "_buscar_ofertas_serper", serper_direto)
+    lista = jds.buscar_ofertas_por_pais("jbl tune 520bt", pais="BR", usar_cache=False)
+    return chamadas, lista
+
+
+def test_por_pais_so_searchapi_nao_chama_serper(monkeypatch):
+    chamadas, lista = _rota_por_pais(monkeypatch, searchapi="chave-searchapi")
+    assert chamadas == ["buscar_ofertas_searchapi"]
+    assert lista and lista[0]["preco_num"] == pytest.approx(228.38)
+
+
+def test_por_pais_searchapi_com_resultado_nao_cai_no_serper(monkeypatch):
+    chamadas, _lista = _rota_por_pais(
+        monkeypatch, searchapi="chave-searchapi", serper="chave-serper",
+    )
+    assert chamadas == ["buscar_ofertas_searchapi"]
+
+
+def test_por_pais_searchapi_vazia_cai_no_serper(monkeypatch):
+    chamadas, lista = _rota_por_pais(
+        monkeypatch,
+        searchapi="chave-searchapi",
+        serper="chave-serper",
+        searchapi_ofertas=[],
+    )
+    assert chamadas == ["buscar_ofertas_searchapi", "buscar_ofertas_serper_shopping"]
+    assert lista and lista[0]["preco_num"] == pytest.approx(228.38)
+
+
+def test_por_pais_so_serper(monkeypatch):
+    chamadas, lista = _rota_por_pais(monkeypatch, serper="chave-serper")
+    assert chamadas == ["buscar_ofertas_serper_shopping"]
+    assert "_buscar_ofertas_serper" not in chamadas
+    assert lista and lista[0]["preco_num"] == pytest.approx(228.38)
+
+
+def test_por_pais_sem_chave_nao_chama_motor_online(monkeypatch):
+    chamadas, lista = _rota_por_pais(monkeypatch)
+    assert chamadas == []
+    assert all((p.get("fonte") or "") not in {"searchapi", "serper"} for p in lista)
+
+
+def test_diag_de_uma_thread_nao_apaga_a_outra():
+    import threading
+
+    jds._ULTIMO_DIAG_SERPER.clear()
+    jds._ULTIMO_DIAG_SERPER.update({"q": "principal", "ofertas": 1})
+    visto = {}
+
+    def outra():
+        jds._ULTIMO_DIAG_SERPER.clear()
+        jds._ULTIMO_DIAG_SERPER.update({"q": "outra", "ofertas": 9})
+        visto["outra"] = jds.ultimo_diag_serper()
+
+    t = threading.Thread(target=outra)
+    t.start()
+    t.join()
+    assert visto["outra"]["q"] == "outra"
+    assert jds.ultimo_diag_serper()["q"] == "principal"

@@ -1582,6 +1582,39 @@ def _parece_acessorio_barato(titulo, termo=""):
     )
 
 
+_RE_FONE_PRODUTO = re.compile(
+    r"\b(fones?|headphones?|headsets?|earbuds?|auriculares?)\b",
+    re.I,
+)
+# Menção como brinde, suporte ou entrada — não é o produto buscado.
+_RE_FONE_ACESSORIO = re.compile(
+    r"(?:"
+    r"\b(?:fones?(?:\s+de\s+ouvido)?|headphones?|headsets?|earbuds?|auriculares?)"
+    r"\s+(?:inclus\w*|incluid\w*|included|de\s+brinde)\b"
+    r"|"
+    r"\b(?:inclus\w*|incluid\w*|included|includes|acompanha|vem\s+com|com|with)"
+    r"(?:\s+\w+){0,4}?\s+"
+    r"(?:fones?(?:\s+de\s+ouvido)?|headphones?|headsets?|earbuds?|auriculares?)\b"
+    r"|"
+    r"\bsuporte\s+para\s+(?:fones?|headphones?|headsets?|earbuds?|auriculares?)\b"
+    r"|"
+    r"\bentrada\s+(?:para|de)\s+(?:fones?|headphones?|headsets?|earbuds?|auriculares?)\b"
+    r"|"
+    r"\b(?:headphone|headset|fone)\s+jack\b"
+    r")",
+    re.I,
+)
+
+
+def _texto_eh_produto_fone(texto):
+    """O texto descreve o fone em si, não um acessório ou característica."""
+    t = _sem_acento(texto or "")
+    if not t.strip():
+        return False
+    resto = _RE_FONE_ACESSORIO.sub(" ", t)
+    return _RE_FONE_PRODUTO.search(resto) is not None
+
+
 def _faixa_preco(termo, pais="BR", titulo=""):
     """Piso e teto para recusar acessório barato e preço 100x (parse)."""
     t = f"{termo or ''} {titulo or ''}".lower()
@@ -1598,7 +1631,7 @@ def _faixa_preco(termo, pais="BR", titulo=""):
         return (180.0, 2500.0) if us else (1200.0, 12000.0)
     if any(k in t for k in ("redmi", "xiaomi", "galaxy", "smartphone", "celular")):
         return (80.0, 1600.0) if us else (449.0, 8000.0)
-    if re.search(r"\b(fones?|headphones?|headsets?|earbuds?|auriculares?)\b", t):
+    if _texto_eh_produto_fone(termo) or _texto_eh_produto_fone(titulo):
         return (25.0, 500.0) if us else (80.0, 2500.0)
     base = float(_obter_preco_base_categoria(termo) or 40)
     if us:
@@ -2822,14 +2855,58 @@ def _parsear_ofertas_google(html, termo, origem="", limite=8):
     return ofertas[:limite]
 
 
-_ULTIMO_DIAG_SERPER = {}
+class _EstadoDiag:
+    """Diagnóstico por thread. Uma busca não apaga o diag da outra."""
+
+    def __init__(self):
+        self._local = threading.local()
+
+    def _bag(self):
+        bag = getattr(self._local, "bag", None)
+        if bag is None:
+            bag = {}
+            self._local.bag = bag
+        return bag
+
+    def clear(self):
+        self._bag().clear()
+
+    def update(self, *args, **kwargs):
+        self._bag().update(*args, **kwargs)
+
+    def get(self, key, default=None):
+        return self._bag().get(key, default)
+
+    def keys(self):
+        return self._bag().keys()
+
+    def items(self):
+        return self._bag().items()
+
+    def __iter__(self):
+        return iter(self._bag())
+
+    def __getitem__(self, key):
+        return self._bag()[key]
+
+    def __setitem__(self, key, value):
+        self._bag()[key] = value
+
+    def __len__(self):
+        return len(self._bag())
+
+    def __bool__(self):
+        return bool(self._bag())
+
+
+_ULTIMO_DIAG_SERPER = _EstadoDiag()
 _SERPER_HTTP_STATS = {"timeouts": 0, "errors": 0}
 HTTP_TIMEOUT_SERPER_POST = 18
 HTTP_TIMEOUT_SERPER_SHOPPING = 25
 
 
 def ultimo_diag_serper():
-    return dict(_ULTIMO_DIAG_SERPER)
+    return dict(_ULTIMO_DIAG_SERPER.items())
 
 
 def _chave_serper():
@@ -4099,7 +4176,7 @@ def gerar_lista_ofertas_reais(
 
 
 def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, limite=20):
-    """Cada busca do usuário: termo → Serper → menor preço nas lojas do país."""
+    """SearchApi primeiro; Serper só sem SearchApi ou quando ela volta vazia."""
     termo = (termo or "").strip()
     pais = _normalizar_pais(pais)
     if not termo:
@@ -4116,8 +4193,18 @@ def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, l
                 print(f"[Cache SQLite] hit validado {_chave_cache(termo, pais=pais)}")
                 return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(validado, pais=pais))
             print(f"[Cache SQLite] descartado por identidade {_chave_cache(termo, pais=pais)}")
-    if usar_vivo and _tem_motor_busca():
-        ofertas = _buscar_ofertas_serper(termo, limite=limite, pais=pais)
+    if usar_vivo and _chaves_env("SEARCHAPI_API_KEY", "SEARCHAPI_KEY"):
+        ofertas = buscar_ofertas_jds_shopping(
+            termo, usar_cache=usar_cache, limite=limite, pais=pais,
+        )
+        ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
+        if ofertas and usar_cache:
+            _gravar_cache_garimpo(termo, ofertas, pais=pais)
+        return ofertas
+    if usar_vivo and _chave_serper():
+        ofertas = buscar_ofertas_serper_shopping(
+            termo, usar_cache=usar_cache, limite=limite, pais=pais,
+        )
         ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
         if ofertas and usar_cache:
             _gravar_cache_garimpo(termo, ofertas, pais=pais)
@@ -7758,7 +7845,7 @@ def buscar_ofertas_jds_shopping(termo, usar_cache=True, limite=20, pais="BR"):
     )
     sap = dict(sap or {})
     sap["serper_timeouts"] = _SERPER_HTTP_STATS["timeouts"]
-    serper_diag = dict(_ULTIMO_DIAG_SERPER)
+    serper_diag = dict(_ULTIMO_DIAG_SERPER.items())
     _ULTIMO_DIAG_SERPER.clear()
     _ULTIMO_DIAG_SERPER.update({
         "q": t,
