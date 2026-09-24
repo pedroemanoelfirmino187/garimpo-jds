@@ -690,3 +690,10 @@ def test_flet_sem_chaves_nao_chama_motor_online(monkeypatch):
     assert chamadas == []
     assert all((p.get("fonte") or "") != "searchapi" for p in lista)
     assert all((p.get("fonte") or "") != "serper" for p in lista)
+
+
+def test_tune_520_a_11_dolares_nao_e_preco_plausivel():
+    titulo = "JBL Tune 520BT Wireless On-Ear Bluetooth Headphones Black"
+    assert jds._preco_plausivel("jbl tune 520bt", 11.95, titulo, pais="US") is False
+    assert jds._preco_plausivel("jbl tune 520bt", 34.95, titulo, pais="US") is True
+    assert jds._preco_plausivel("jbl tune 520bt", 228.38, "Fone de Ouvido JBL Tune 520BT", pais="BR") is True

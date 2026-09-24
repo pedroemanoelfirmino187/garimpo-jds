@@ -1582,9 +1582,9 @@ def _parece_acessorio_barato(titulo, termo=""):
     )
 
 
-def _faixa_preco(termo, pais="BR"):
+def _faixa_preco(termo, pais="BR", titulo=""):
     """Piso e teto para recusar acessório barato e preço 100x (parse)."""
-    t = (termo or "").lower()
+    t = f"{termo or ''} {titulo or ''}".lower()
     us = _normalizar_pais(pais) == "US"
     if any(k in t for k in ("dualsense", "ps5", "playstation", "xbox", "controle")):
         return (35.0, 280.0) if us else (320.0, 1600.0)
@@ -1598,6 +1598,8 @@ def _faixa_preco(termo, pais="BR"):
         return (180.0, 2500.0) if us else (1200.0, 12000.0)
     if any(k in t for k in ("redmi", "xiaomi", "galaxy", "smartphone", "celular")):
         return (80.0, 1600.0) if us else (449.0, 8000.0)
+    if re.search(r"\b(fones?|headphones?|headsets?|earbuds?|auriculares?)\b", t):
+        return (25.0, 500.0) if us else (80.0, 2500.0)
     base = float(_obter_preco_base_categoria(termo) or 40)
     if us:
         return (max(5.0, base * 0.08), max(800.0, base * 3))
@@ -1614,7 +1616,7 @@ def _preco_plausivel(termo, preco, titulo, pais="BR"):
     if _parece_acessorio_barato(titulo, termo):
         return False
     tlow = (termo or "").lower()
-    piso, teto = _faixa_preco(termo, pais=pais)
+    piso, teto = _faixa_preco(termo, pais=pais, titulo=titulo)
     if any(k in tlow for k in ("cabo", "carregador")):
         piso = 5.0 if _normalizar_pais(pais) == "US" else 5.0
         teto = max(teto, 200.0)
