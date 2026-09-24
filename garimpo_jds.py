@@ -2835,6 +2835,11 @@ def _chave_serper():
     return chaves[0] if chaves else ""
 
 
+def _tem_motor_busca():
+    """SearchApi ou Serper. Uma chave basta para o motor ao vivo."""
+    return bool(_chave_serper() or _chaves_env("SEARCHAPI_API_KEY", "SEARCHAPI_KEY"))
+
+
 def _serper_foi_timeout(exc):
     if isinstance(exc, TimeoutError):
         return True
@@ -3952,7 +3957,7 @@ def gerar_lista_ofertas_reais(
                 print(f"[Motor] cache instantâneo: {lista[0]['preco']} em {lista[0].get('loja')}")
                 return lista
 
-    if usar_vivo and _chave_serper():
+    if usar_vivo and _tem_motor_busca():
         ofertas = _buscar_ofertas_serper(termo, limite=20, pais=pais)
         ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
         if ofertas and usar_cache:
@@ -4102,7 +4107,7 @@ def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, l
                 print(f"[Cache SQLite] hit validado {_chave_cache(termo, pais=pais)}")
                 return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(validado, pais=pais))
             print(f"[Cache SQLite] descartado por identidade {_chave_cache(termo, pais=pais)}")
-    if usar_vivo and _chave_serper():
+    if usar_vivo and _tem_motor_busca():
         ofertas = _buscar_ofertas_serper(termo, limite=limite, pais=pais)
         ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
         if ofertas and usar_cache:
@@ -7117,9 +7122,16 @@ def _jds_id_anuncio_na_pagina(url, plat, html):
     return False
 
 
-def _jds_html_anuncio(url):
-    corpo, _origem = _baixar_url_loja(url, timeout=12, avisar=False)
+CONFIRMER_TIMEOUT_SEG = 4
+
+
+def _jds_html_anuncio(url, timeout=12):
+    corpo, _origem = _baixar_url_loja(url, timeout=timeout, avisar=False)
     return corpo or ""
+
+
+def _jds_html_anuncio_curto(url):
+    return _jds_html_anuncio(url, timeout=CONFIRMER_TIMEOUT_SEG)
 
 
 def _jds_baixar_html_direto(url, timeout=12):
@@ -7423,11 +7435,11 @@ def _jds_confirmar_oferta_na_pagina(
             and (item.get("fonte") or "") == "searchapi"
         ):
             if plat == "mercado_livre":
-                bruto = _jds_baixar_html_direto(pdp)
+                bruto = _jds_baixar_html_direto(pdp, timeout=CONFIRMER_TIMEOUT_SEG)
                 if _html_e_verificacao_mercadolivre(bruto):
                     html = bruto
             elif plat == "amazon":
-                bruto = _jds_baixar_html_direto(pdp)
+                bruto = _jds_baixar_html_direto(pdp, timeout=CONFIRMER_TIMEOUT_SEG)
                 if _html_e_captcha_amazon(bruto):
                     html = bruto
     if not html:
@@ -7535,18 +7547,47 @@ def _jds_confirmar_listings(
     pais = _normalizar_pais(pais)
     saida = []
     vistos = set()
+    fila = []
+    por_loja = {}
+    pular = (os.environ.get("JDS_SKIP_PAGE_CONFIRM") or "").strip() == "1"
     for item in ofertas or []:
         if not isinstance(item, dict):
             continue
-        if (os.environ.get("JDS_SKIP_PAGE_CONFIRM") or "").strip() == "1":
+        if pular:
+            fila.append(item)
+            continue
+        plat = item.get("plataforma") or ""
+        por_loja.setdefault(plat, []).append(item)
+    if not pular:
+        for grupo in por_loja.values():
+            unicos = {}
+            for candidato in grupo:
+                chave = _url_pdp_para_confirmar(candidato) or candidato.get("url") or id(candidato)
+                atual = unicos.get(chave)
+                if atual is None or _rank_oferta_real(candidato) < _rank_oferta_real(atual):
+                    unicos[chave] = candidato
+            ordenados = sorted(unicos.values(), key=_rank_oferta_real)
+            fila.append(ordenados)
+    for item in fila:
+        if pular:
             ok = dict(item)
             ok["confirmada_pagina"] = False
             saida.append(ok)
             continue
-        ok = _jds_confirmar_oferta_na_pagina(
-            item, baixar=baixar, motivos=motivos, amostras=amostras,
-            http_get=http_get, orcamento=orcamento, usar_cache=usar_cache,
-        )
+        if isinstance(item, list):
+            ok = None
+            for candidato in item:
+                ok = _jds_confirmar_oferta_na_pagina(
+                    candidato, baixar=baixar or _jds_html_anuncio_curto, motivos=motivos, amostras=amostras,
+                    http_get=http_get, orcamento=orcamento, usar_cache=usar_cache,
+                )
+                if ok:
+                    break
+        else:
+            ok = _jds_confirmar_oferta_na_pagina(
+                item, baixar=baixar or _jds_html_anuncio_curto, motivos=motivos, amostras=amostras,
+                http_get=http_get, orcamento=orcamento, usar_cache=usar_cache,
+            )
         if not ok:
             continue
         plat = ok.get("plataforma")

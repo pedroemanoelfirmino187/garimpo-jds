@@ -9,6 +9,8 @@ import hmac
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -140,13 +142,48 @@ def _token_recebido(authorization: str | None, x_jds_token: str | None) -> str:
     return (x_jds_token or bearer or "").strip()
 
 
+_LIMITE_LOCK = threading.Lock()
+_LIMITE_JANELA: dict[str, list[float]] = {}
+
+
+def _api_em_producao() -> bool:
+    return bool((os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RENDER") or "").strip())
+
+
+def _limite_buscas() -> int:
+    try:
+        n = int((os.environ.get("JDS_RATE_LIMIT") or "30").strip() or 30)
+    except ValueError:
+        n = 30
+    return max(1, min(n, 300))
+
+
+def _consumir_limite(chave: str) -> None:
+    if not _api_em_producao():
+        return
+    agora = time.monotonic()
+    limite = _limite_buscas()
+    with _LIMITE_LOCK:
+        fila = [t for t in _LIMITE_JANELA.get(chave, []) if agora - t < 60]
+        if len(fila) >= limite:
+            _LIMITE_JANELA[chave] = fila
+            raise HTTPException(status_code=429, detail="limite de buscas")
+        fila.append(agora)
+        _LIMITE_JANELA[chave] = fila
+
+
 def _autorizar_app(
     request: Request,
     authorization: str | None = Header(default=None),
     x_jds_token: str | None = Header(default=None, alias="X-JDS-TOKEN"),
 ):
-    """Se JDS_API_TOKEN existir, o app móvel precisa enviar o mesmo valor."""
+    """No Railway/Render o token é obrigatório. No PC, só se JDS_API_TOKEN existir."""
     esperado = (os.environ.get("JDS_API_TOKEN") or "").strip()
+    if _api_em_producao() and not esperado:
+        raise HTTPException(
+            status_code=401,
+            detail=mensagem_servidor("token_invalido", _pais_do_request(request)),
+        )
     if not esperado:
         return True
     recebido = _token_recebido(authorization, x_jds_token)
@@ -155,6 +192,7 @@ def _autorizar_app(
             status_code=401,
             detail=mensagem_servidor("token_invalido", _pais_do_request(request)),
         )
+    _consumir_limite(recebido)
     return True
 
 

@@ -535,3 +535,88 @@ def test_confirmer_amazon_e_ml_seguem_exigindo_id_na_pagina():
     lista_ml["original_url"] = lista_ml["url"]
     lista_ml["link"] = lista_ml["url"]
     assert jds._jds_confirmar_oferta_na_pagina(lista_ml, html=html_ml_ok) is None
+
+
+def test_confirmer_baixa_so_a_oferta_mais_barata_da_loja():
+    barato = _oferta_amazon("Fone de Ouvido Bluetooth JBL Tune 520BT", 228.38, "B0C6SPNVF5")
+    caro = _oferta_amazon("Fone de Ouvido Bluetooth JBL Tune 520BT", 399.0, "B0OTHERASIN")
+    html = """
+    <html><body>
+    <span id="productTitle">JBL Tune 520BT Sem Fio Branco</span>
+    <span class="a-offscreen">R$228,38</span>
+    B0C6SPNVF5
+    </body></html>
+    """
+    baixadas = []
+
+    def baixar(url):
+        baixadas.append(url)
+        return html if "B0C6SPNVF5" in url else ""
+
+    saida = jds._jds_confirmar_listings([caro, barato], baixar=baixar)
+    assert len(baixadas) == 1
+    assert "B0C6SPNVF5" in baixadas[0]
+    assert saida[0]["preco_num"] == pytest.approx(228.38)
+
+
+def test_html_vazio_nao_confirma_oferta_estruturada():
+    item = _oferta_amazon("Fone de Ouvido Bluetooth JBL Tune 520BT", 228.38, "B0C6SPNVF5")
+    item["fonte"] = "searchapi"
+    item["listing_source"] = {
+        "titulo": item["titulo"],
+        "preco_num": 228.38,
+        "extracted_price": 228.38,
+        "url": item["url"],
+        "imagem": item["foto"],
+        "product_token": "tok",
+        "consulta": item["titulo"],
+    }
+    assert jds._jds_confirmar_listings([item], baixar=lambda url: "") == []
+
+
+def test_railway_sem_token_recusa_garimpar(monkeypatch):
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.delenv("JDS_API_TOKEN", raising=False)
+    with patch("api.main._buscar_serper_pais", return_value=[]):
+        client = TestClient(app)
+        busca = client.get("/garimpar", params={"q": "ps5"})
+        saude = client.get("/health")
+    assert busca.status_code == 401
+    assert saude.status_code == 200
+
+
+def test_limite_de_buscas_no_railway(monkeypatch):
+    import api.main as api
+
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("JDS_API_TOKEN", "token-limite")
+    monkeypatch.setenv("JDS_RATE_LIMIT", "2")
+    api._LIMITE_JANELA.clear()
+    with patch("api.main._buscar_serper_pais", return_value=[]):
+        client = TestClient(app)
+        headers = {"X-JDS-TOKEN": "token-limite"}
+        primeiro = client.get("/garimpar", params={"q": "ps5"}, headers=headers)
+        segundo = client.get("/garimpar", params={"q": "ps5"}, headers=headers)
+        terceiro = client.get("/garimpar", params={"q": "ps5"}, headers=headers)
+    assert primeiro.status_code == 200
+    assert segundo.status_code == 200
+    assert terceiro.status_code == 429
+
+
+def test_pc_com_searchapi_sem_serper_entra_no_motor(monkeypatch):
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    monkeypatch.delenv("SERPER_KEY", raising=False)
+    monkeypatch.setenv("SEARCHAPI_API_KEY", "simulada")
+    monkeypatch.setattr(jds, "_ler_cache_garimpo", lambda *a, **k: None)
+    monkeypatch.setattr(jds, "_gravar_cache_garimpo", lambda *a, **k: None)
+    oferta = _oferta_amazon("Fone de Ouvido Bluetooth JBL Tune 520BT", 228.38, "B0C6SPNVF5")
+    chamadas = {"n": 0}
+
+    def shopping(termo, usar_cache=True, limite=20, pais="BR"):
+        chamadas["n"] += 1
+        return [oferta]
+
+    monkeypatch.setattr(jds, "buscar_ofertas_jds_shopping", shopping)
+    lista = jds.buscar_ofertas_por_pais("zzz simulacao sem serper", usar_cache=False, usar_vivo=True)
+    assert chamadas["n"] == 1
+    assert lista and lista[0]["preco_num"] == pytest.approx(228.38)

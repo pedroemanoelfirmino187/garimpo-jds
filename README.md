@@ -48,7 +48,7 @@ O app móvel chama:
 
 ```text
 POST /garimpar
-Header: X-JDS-TOKEN: (o mesmo de JDS_API_TOKEN no Railway, se você configurar)
+Header: X-JDS-TOKEN: (o mesmo de JDS_API_TOKEN; no Railway o token é obrigatório)
 Body: {"q": "smart tv 50"}
 ```
 
