@@ -1582,9 +1582,42 @@ def _parece_acessorio_barato(titulo, termo=""):
     )
 
 
-def _faixa_preco(termo, pais="BR"):
+_RE_FONE_PRODUTO = re.compile(
+    r"\b(fones?|headphones?|headsets?|earbuds?|auriculares?)\b",
+    re.I,
+)
+# Menção como brinde, suporte ou entrada — não é o produto buscado.
+_RE_FONE_ACESSORIO = re.compile(
+    r"(?:"
+    r"\b(?:fones?(?:\s+de\s+ouvido)?|headphones?|headsets?|earbuds?|auriculares?)"
+    r"\s+(?:inclus\w*|incluid\w*|included|de\s+brinde)\b"
+    r"|"
+    r"\b(?:inclus\w*|incluid\w*|included|includes|acompanha|vem\s+com|com|with)"
+    r"(?:\s+\w+){0,4}?\s+"
+    r"(?:fones?(?:\s+de\s+ouvido)?|headphones?|headsets?|earbuds?|auriculares?)\b"
+    r"|"
+    r"\bsuporte\s+para\s+(?:fones?|headphones?|headsets?|earbuds?|auriculares?)\b"
+    r"|"
+    r"\bentrada\s+(?:para|de)\s+(?:fones?|headphones?|headsets?|earbuds?|auriculares?)\b"
+    r"|"
+    r"\b(?:headphone|headset|fone)\s+jack\b"
+    r")",
+    re.I,
+)
+
+
+def _texto_eh_produto_fone(texto):
+    """O texto descreve o fone em si, não um acessório ou característica."""
+    t = _sem_acento(texto or "")
+    if not t.strip():
+        return False
+    resto = _RE_FONE_ACESSORIO.sub(" ", t)
+    return _RE_FONE_PRODUTO.search(resto) is not None
+
+
+def _faixa_preco(termo, pais="BR", titulo=""):
     """Piso e teto para recusar acessório barato e preço 100x (parse)."""
-    t = (termo or "").lower()
+    t = f"{termo or ''} {titulo or ''}".lower()
     us = _normalizar_pais(pais) == "US"
     if any(k in t for k in ("dualsense", "ps5", "playstation", "xbox", "controle")):
         return (35.0, 280.0) if us else (320.0, 1600.0)
@@ -1598,6 +1631,8 @@ def _faixa_preco(termo, pais="BR"):
         return (180.0, 2500.0) if us else (1200.0, 12000.0)
     if any(k in t for k in ("redmi", "xiaomi", "galaxy", "smartphone", "celular")):
         return (80.0, 1600.0) if us else (449.0, 8000.0)
+    if _texto_eh_produto_fone(termo) or _texto_eh_produto_fone(titulo):
+        return (25.0, 500.0) if us else (80.0, 2500.0)
     base = float(_obter_preco_base_categoria(termo) or 40)
     if us:
         return (max(5.0, base * 0.08), max(800.0, base * 3))
@@ -1614,7 +1649,7 @@ def _preco_plausivel(termo, preco, titulo, pais="BR"):
     if _parece_acessorio_barato(titulo, termo):
         return False
     tlow = (termo or "").lower()
-    piso, teto = _faixa_preco(termo, pais=pais)
+    piso, teto = _faixa_preco(termo, pais=pais, titulo=titulo)
     if any(k in tlow for k in ("cabo", "carregador")):
         piso = 5.0 if _normalizar_pais(pais) == "US" else 5.0
         teto = max(teto, 200.0)
@@ -2820,19 +2855,68 @@ def _parsear_ofertas_google(html, termo, origem="", limite=8):
     return ofertas[:limite]
 
 
-_ULTIMO_DIAG_SERPER = {}
+class _EstadoDiag:
+    """Diagnóstico por thread. Uma busca não apaga o diag da outra."""
+
+    def __init__(self):
+        self._local = threading.local()
+
+    def _bag(self):
+        bag = getattr(self._local, "bag", None)
+        if bag is None:
+            bag = {}
+            self._local.bag = bag
+        return bag
+
+    def clear(self):
+        self._bag().clear()
+
+    def update(self, *args, **kwargs):
+        self._bag().update(*args, **kwargs)
+
+    def get(self, key, default=None):
+        return self._bag().get(key, default)
+
+    def keys(self):
+        return self._bag().keys()
+
+    def items(self):
+        return self._bag().items()
+
+    def __iter__(self):
+        return iter(self._bag())
+
+    def __getitem__(self, key):
+        return self._bag()[key]
+
+    def __setitem__(self, key, value):
+        self._bag()[key] = value
+
+    def __len__(self):
+        return len(self._bag())
+
+    def __bool__(self):
+        return bool(self._bag())
+
+
+_ULTIMO_DIAG_SERPER = _EstadoDiag()
 _SERPER_HTTP_STATS = {"timeouts": 0, "errors": 0}
 HTTP_TIMEOUT_SERPER_POST = 18
 HTTP_TIMEOUT_SERPER_SHOPPING = 25
 
 
 def ultimo_diag_serper():
-    return dict(_ULTIMO_DIAG_SERPER)
+    return dict(_ULTIMO_DIAG_SERPER.items())
 
 
 def _chave_serper():
     chaves = _chaves_env("SERPER_API_KEY", "SERPER_KEY")
     return chaves[0] if chaves else ""
+
+
+def _tem_motor_busca():
+    """SearchApi ou Serper. Uma chave basta para o motor ao vivo."""
+    return bool(_chave_serper() or _chaves_env("SEARCHAPI_API_KEY", "SEARCHAPI_KEY"))
 
 
 def _serper_foi_timeout(exc):
@@ -3952,8 +4036,15 @@ def gerar_lista_ofertas_reais(
                 print(f"[Motor] cache instantâneo: {lista[0]['preco']} em {lista[0].get('loja')}")
                 return lista
 
+    if usar_vivo and _chaves_env("SEARCHAPI_API_KEY", "SEARCHAPI_KEY"):
+        ofertas = buscar_ofertas_jds_shopping(termo, usar_cache=usar_cache, limite=20, pais=pais)
+        ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
+        if ofertas and usar_cache:
+            _gravar_cache_garimpo(termo, ofertas, pais=pais)
+        return ofertas
+
     if usar_vivo and _chave_serper():
-        ofertas = _buscar_ofertas_serper(termo, limite=20, pais=pais)
+        ofertas = buscar_ofertas_serper_shopping(termo, usar_cache=usar_cache, limite=20, pais=pais)
         ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
         if ofertas and usar_cache:
             _gravar_cache_garimpo(termo, ofertas, pais=pais)
@@ -4085,7 +4176,7 @@ def gerar_lista_ofertas_reais(
 
 
 def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, limite=20):
-    """Cada busca do usuário: termo → Serper → menor preço nas lojas do país."""
+    """SearchApi primeiro; Serper só sem SearchApi ou quando ela volta vazia."""
     termo = (termo or "").strip()
     pais = _normalizar_pais(pais)
     if not termo:
@@ -4102,8 +4193,18 @@ def buscar_ofertas_por_pais(termo, pais="BR", usar_cache=True, usar_vivo=True, l
                 print(f"[Cache SQLite] hit validado {_chave_cache(termo, pais=pais)}")
                 return _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(validado, pais=pais))
             print(f"[Cache SQLite] descartado por identidade {_chave_cache(termo, pais=pais)}")
+    if usar_vivo and _chaves_env("SEARCHAPI_API_KEY", "SEARCHAPI_KEY"):
+        ofertas = buscar_ofertas_jds_shopping(
+            termo, usar_cache=usar_cache, limite=limite, pais=pais,
+        )
+        ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
+        if ofertas and usar_cache:
+            _gravar_cache_garimpo(termo, ofertas, pais=pais)
+        return ofertas
     if usar_vivo and _chave_serper():
-        ofertas = _buscar_ofertas_serper(termo, limite=limite, pais=pais)
+        ofertas = buscar_ofertas_serper_shopping(
+            termo, usar_cache=usar_cache, limite=limite, pais=pais,
+        )
         ofertas = _ordenar_entrega_menor_preco(_carimbar_lista_afiliado(ofertas, pais=pais))
         if ofertas and usar_cache:
             _gravar_cache_garimpo(termo, ofertas, pais=pais)
@@ -7117,9 +7218,16 @@ def _jds_id_anuncio_na_pagina(url, plat, html):
     return False
 
 
-def _jds_html_anuncio(url):
-    corpo, _origem = _baixar_url_loja(url, timeout=12, avisar=False)
+CONFIRMER_TIMEOUT_SEG = 4
+
+
+def _jds_html_anuncio(url, timeout=12):
+    corpo, _origem = _baixar_url_loja(url, timeout=timeout, avisar=False)
     return corpo or ""
+
+
+def _jds_html_anuncio_curto(url):
+    return _jds_html_anuncio(url, timeout=CONFIRMER_TIMEOUT_SEG)
 
 
 def _jds_baixar_html_direto(url, timeout=12):
@@ -7423,11 +7531,11 @@ def _jds_confirmar_oferta_na_pagina(
             and (item.get("fonte") or "") == "searchapi"
         ):
             if plat == "mercado_livre":
-                bruto = _jds_baixar_html_direto(pdp)
+                bruto = _jds_baixar_html_direto(pdp, timeout=CONFIRMER_TIMEOUT_SEG)
                 if _html_e_verificacao_mercadolivre(bruto):
                     html = bruto
             elif plat == "amazon":
-                bruto = _jds_baixar_html_direto(pdp)
+                bruto = _jds_baixar_html_direto(pdp, timeout=CONFIRMER_TIMEOUT_SEG)
                 if _html_e_captcha_amazon(bruto):
                     html = bruto
     if not html:
@@ -7535,18 +7643,47 @@ def _jds_confirmar_listings(
     pais = _normalizar_pais(pais)
     saida = []
     vistos = set()
+    fila = []
+    por_loja = {}
+    pular = (os.environ.get("JDS_SKIP_PAGE_CONFIRM") or "").strip() == "1"
     for item in ofertas or []:
         if not isinstance(item, dict):
             continue
-        if (os.environ.get("JDS_SKIP_PAGE_CONFIRM") or "").strip() == "1":
+        if pular:
+            fila.append(item)
+            continue
+        plat = item.get("plataforma") or ""
+        por_loja.setdefault(plat, []).append(item)
+    if not pular:
+        for grupo in por_loja.values():
+            unicos = {}
+            for candidato in grupo:
+                chave = _url_pdp_para_confirmar(candidato) or candidato.get("url") or id(candidato)
+                atual = unicos.get(chave)
+                if atual is None or _rank_oferta_real(candidato) < _rank_oferta_real(atual):
+                    unicos[chave] = candidato
+            ordenados = sorted(unicos.values(), key=_rank_oferta_real)
+            fila.append(ordenados)
+    for item in fila:
+        if pular:
             ok = dict(item)
             ok["confirmada_pagina"] = False
             saida.append(ok)
             continue
-        ok = _jds_confirmar_oferta_na_pagina(
-            item, baixar=baixar, motivos=motivos, amostras=amostras,
-            http_get=http_get, orcamento=orcamento, usar_cache=usar_cache,
-        )
+        if isinstance(item, list):
+            ok = None
+            for candidato in item:
+                ok = _jds_confirmar_oferta_na_pagina(
+                    candidato, baixar=baixar or _jds_html_anuncio_curto, motivos=motivos, amostras=amostras,
+                    http_get=http_get, orcamento=orcamento, usar_cache=usar_cache,
+                )
+                if ok:
+                    break
+        else:
+            ok = _jds_confirmar_oferta_na_pagina(
+                item, baixar=baixar or _jds_html_anuncio_curto, motivos=motivos, amostras=amostras,
+                http_get=http_get, orcamento=orcamento, usar_cache=usar_cache,
+            )
         if not ok:
             continue
         plat = ok.get("plataforma")
@@ -7708,7 +7845,7 @@ def buscar_ofertas_jds_shopping(termo, usar_cache=True, limite=20, pais="BR"):
     )
     sap = dict(sap or {})
     sap["serper_timeouts"] = _SERPER_HTTP_STATS["timeouts"]
-    serper_diag = dict(_ULTIMO_DIAG_SERPER)
+    serper_diag = dict(_ULTIMO_DIAG_SERPER.items())
     _ULTIMO_DIAG_SERPER.clear()
     _ULTIMO_DIAG_SERPER.update({
         "q": t,

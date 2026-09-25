@@ -25,7 +25,51 @@ HTTP_TIMEOUT_SEARCHAPI_READ = 12
 
 _LOCK = threading.Lock()
 _MEM = {}
-_ULTIMO_DIAG = {}
+class _EstadoDiag:
+    """Diagnóstico por thread. Uma busca não apaga o diag da outra."""
+
+    def __init__(self):
+        self._local = threading.local()
+
+    def _bag(self):
+        bag = getattr(self._local, "bag", None)
+        if bag is None:
+            bag = {}
+            self._local.bag = bag
+        return bag
+
+    def clear(self):
+        self._bag().clear()
+
+    def update(self, *args, **kwargs):
+        self._bag().update(*args, **kwargs)
+
+    def get(self, key, default=None):
+        return self._bag().get(key, default)
+
+    def keys(self):
+        return self._bag().keys()
+
+    def items(self):
+        return self._bag().items()
+
+    def __iter__(self):
+        return iter(self._bag())
+
+    def __getitem__(self, key):
+        return self._bag()[key]
+
+    def __setitem__(self, key, value):
+        self._bag()[key] = value
+
+    def __len__(self):
+        return len(self._bag())
+
+    def __bool__(self):
+        return bool(self._bag())
+
+
+_ULTIMO_DIAG = _EstadoDiag()
 _HTTP_GET = None  # testes: (params) -> (http, dict|None, bruto)
 
 
@@ -102,7 +146,7 @@ def _rejeitar(motivos, amostras, motivo, ofe=None, item=None):
 
 
 def ultimo_diag_searchapi():
-    return dict(_ULTIMO_DIAG)
+    return dict(_ULTIMO_DIAG.items())
 
 
 def _chave_searchapi():
