@@ -8061,6 +8061,23 @@ def _jds_consulta_v4_sem_exigir_ps5(consulta):
     texto = re.sub(r"\bps5\b", " ", texto, flags=re.I)
     return re.sub(r"\s+", " ", texto).strip()
 
+_ASSISTENTE_VOZ = r"(?:alexa|google(?:\s+home|\s+assistant)?|siri|assistente(?:\s+de\s+voz)?)"
+_COMPATIVEL_ASSISTENTE = re.compile(
+    rf"\bcompativel com {_ASSISTENTE_VOZ}(?:\s+e\s+{_ASSISTENTE_VOZ})*\b"
+)
+
+
+_RE_PRODUTO_SMART_TV = re.compile(r"\bsmart\s+tv\b|\btv\s+smart\b")
+
+
+def _texto_sem_compativel_assistente(n):
+    """Na Smart TV, 'compatível com Alexa' é recurso. Nos demais, continua nao_original."""
+    texto = n or ""
+    if not _RE_PRODUTO_SMART_TV.search(texto):
+        return texto
+    return _COMPATIVEL_ASSISTENTE.sub(" ", texto)
+
+
 def _jds_hard_features(s):
     n = _jds_hard_norm(s)
     toks = set(n.split())
@@ -8068,7 +8085,8 @@ def _jds_hard_features(s):
     conditions = set()
     if re.search(r"\b(usado|seminovo|semi novo)\b", n): conditions.add("usado")
     if re.search(r"\b(original|genuino|genuina)\b", n): conditions.add("original")
-    if re.search(r"\b(compativel|generico|paralelo)\b", n): conditions.add("nao_original")
+    base_cond = _texto_sem_compativel_assistente(n)
+    if re.search(r"\b(compativel|generico|paralelo)\b", base_cond): conditions.add("nao_original")
     caps = set(re.findall(r"\b\d+(?:[.,]\d+)?(?:gb|tb|mb|mah|w|hz|ml|l|kg|g)\b", n))
     # Assinaturas de modelo/geração: S24, A55, G84, 520BT, PS5 etc.
     # Exclui palavras de unidade e números que são apenas capacidade.
