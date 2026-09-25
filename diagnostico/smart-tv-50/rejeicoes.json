@@ -1,0 +1,71 @@
+{
+  "consulta": "smart tv 50",
+  "branch": "cursor/busca-segura-7dfb",
+  "commit": "4d58fd7",
+  "http": 200,
+  "total_ofertas": 0,
+  "searchapi_status": "SEARCHAPI_EMPTY",
+  "rejeicoes": {
+    "loja_fora": 4,
+    "matcher_rejeitou": 1,
+    "html_vazio": 1,
+    "confirmer_rejeitou": 1
+  },
+  "rejeicoes_ofertas": [
+    {
+      "loja": "Amazon.com.br - Seller",
+      "titulo": "Smart TV 50\" Roku Multi 4K Compatível com Alexa e Google Home - TL059M",
+      "preco": 2299.9,
+      "original_url": "https://www.amazon.com.br/dp/B0DBM7323B",
+      "asin": "B0DBM7323B",
+      "motivo": "matcher_rejeitou",
+      "causa": "A palavra compatível em 'Compatível com Alexa e Google Home' marcava o anúncio como nao_original."
+    },
+    {
+      "loja": "KaBuM!",
+      "titulo": "Smart Tv Multi 50 4k QLED Wifi Bluetooth C/sistema Roku HDMI Usb Tl059m",
+      "preco": 2356.94,
+      "original_url": "https://www.kabum.com.br/produto/619741",
+      "motivo": "loja_fora"
+    },
+    {
+      "loja": "Magalu",
+      "titulo": "Smart TV DLED 50 4K Toshiba VIDAA 3HDMI 2USB Wi-Fi, Preto",
+      "preco": 2374.05,
+      "original_url": "https://www.magazineluiza.com.br/smart-tv-dled-50-4k-toshiba-vidaa-3hdmi-2usb-wi-fi/p/dg801a90kd/et/elit/",
+      "motivo": "loja_fora"
+    },
+    {
+      "loja": "Gazin",
+      "titulo": "Smart Tv Aoc Dled 50\" 4K Wi-Fi Roku Tv Dolby Vision Hdr10 50U6125/78G",
+      "preco": 1349.9,
+      "original_url": "https://www.gazin.com.br/produto/smart-tv-aoc-dled-50-4k-wi-fi-roku-tv-dolby-vision-hdr10-50u612578g/6426/sem-cor/sem-voltagem",
+      "motivo": "loja_fora"
+    },
+    {
+      "loja": "KaBuM!",
+      "titulo": "Smart TV 50 Polegadas Aoc DLED - VA 4K UHD, 4 HDMI, 2 USB, Wi-Fi, Linha Marrom - 50u6125/78g",
+      "preco": 2599.9,
+      "original_url": "https://www.kabum.com.br/produto/395348",
+      "motivo": "loja_fora"
+    },
+    {
+      "loja": "mercadolivre.com.br",
+      "titulo": "Smart Tv 50 Polegadas Dled 4k Multi Roku 4hdmi 2usb Wi-fi",
+      "preco": 2229.06,
+      "original_url": "https://www.mercadolivre.com.br/smart-tv-50-polegadas-dled-4k-multi-roku-4hdmi-2usb-wifi/up/MLBU3365756008",
+      "mlb": "MLBU3365756008",
+      "motivo": "html_vazio",
+      "motivo_extra": "confirmer_rejeitou"
+    }
+  ],
+  "serper_fallback": {
+    "acionado": true,
+    "http": 200,
+    "shopping": 40,
+    "apos_extrair": 0,
+    "apos_matcher": 0,
+    "apos_confirmer": 0,
+    "motivo_por_item": null
+  }
+}
