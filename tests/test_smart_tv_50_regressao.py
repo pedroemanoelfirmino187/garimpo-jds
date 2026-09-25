@@ -49,6 +49,34 @@ def test_compativel_com_console_continua_generico():
     assert "nao_original" in jds._jds_hard_features(TITULO_GENERICO)[3]
 
 
+def test_smart_tv_assistente_continua_aceita():
+    assert jds._jds_anuncio_bate_consulta(Q, "Smart TV 50 4K Compatível com Alexa") is True
+    assert jds._jds_anuncio_bate_consulta(Q, "Smart TV 50 4K Compatível com Google Home") is True
+    assert jds._jds_anuncio_bate_consulta(Q, TITULO_AMZ) is True
+    assert "nao_original" not in jds._jds_hard_features(
+        "Smart TV 50 4K Compatível com Alexa"
+    )[3]
+
+
+def test_dualsense_compativel_com_alexa_continua_rejeitado():
+    titulo = "Controle DualSense Compatível com Alexa"
+    assert jds._jds_anuncio_bate_consulta("dualsense", titulo) is False
+    assert "nao_original" in jds._jds_hard_features(titulo)[3]
+
+
+def test_capa_iphone_compativel_com_alexa_continua_rejeitada():
+    titulo = "Capa iPhone 15 Compatível com Alexa"
+    assert jds._jds_anuncio_bate_consulta("iphone 15", titulo) is False
+    assert jds._titulo_shopping_ok("iphone 15", titulo) is False
+    assert "nao_original" in jds._jds_hard_features(titulo)[3]
+
+
+def test_smart_tv_compativel_com_ps5_continua_rejeitada():
+    titulo = "Smart TV 50 4K Compatível com PS5"
+    assert jds._jds_anuncio_bate_consulta(Q, titulo) is False
+    assert "nao_original" in jds._jds_hard_features(titulo)[3]
+
+
 def test_tv_32_nao_passa_como_50():
     assert jds._jds_anuncio_bate_consulta(Q, TITULO_32) is False
     assert jds._titulo_relevante(Q, TITULO_32) is False

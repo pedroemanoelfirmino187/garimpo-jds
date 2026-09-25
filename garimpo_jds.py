@@ -8067,9 +8067,15 @@ _COMPATIVEL_ASSISTENTE = re.compile(
 )
 
 
+_RE_PRODUTO_SMART_TV = re.compile(r"\bsmart\s+tv\b|\btv\s+smart\b")
+
+
 def _texto_sem_compativel_assistente(n):
-    """'compatível com Alexa' é recurso da TV, não anúncio genérico/paralelo."""
-    return _COMPATIVEL_ASSISTENTE.sub(" ", n or "")
+    """Na Smart TV, 'compatível com Alexa' é recurso. Nos demais, continua nao_original."""
+    texto = n or ""
+    if not _RE_PRODUTO_SMART_TV.search(texto):
+        return texto
+    return _COMPATIVEL_ASSISTENTE.sub(" ", texto)
 
 
 def _jds_hard_features(s):
