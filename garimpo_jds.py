@@ -4213,20 +4213,270 @@ def ouvir_produto_microfone():
     return _ouvir_google_ptbr()
 
 
-def _ofertas_super_descontos():
-    ofertas = []
-    for cat in CATALOGO_PRODUTOS_REAIS[:5]:
-        for of in cat["ofertas"]:
-            item = _montar_item_oferta(
-                of["titulo"], of["preco"], of["url"],
-                of.get("foto") or cat["foto_real"], of["plataforma"],
-                full=of.get("full", False),
-                selo=f"-{int((1 - of['preco'] / of['de']) * 100)}%" if of.get("de") else "SUPER",
-            )
-            ofertas.append(item)
-    ofertas = [p for p in ofertas if _oferta_foto_preco_do_mesmo_item(p)]
-    ofertas.sort(key=lambda p: p["preco_num"])
-    return _ordenar_entrega_menor_preco(ofertas)[:6]
+# Consultas reais. A data escolhe quais entram no dia; o preço vem da busca.
+_CONSULTAS_SUPER_DESCONTOS = (
+    "iPhone 15 128GB",
+    "controle dualsense ps5",
+    "smart tv 50",
+    "jbl tune 520bt",
+    "redmi note 13",
+    "air fryer mondial",
+    "copo termico stanley",
+    "smartwatch d20",
+    "controle xbox series",
+)
+_SUPER_DESCONTOS_POR_DIA = 3
+_FONTES_SUPER_DESCONTOS = {"searchapi", "google", "serper", "oficial", "scrape"}
+
+
+def _dia_super_descontos(dia=None):
+    if isinstance(dia, datetime):
+        return dia.date().isoformat()
+    if isinstance(dia, date):
+        return dia.isoformat()
+    texto = str(dia or "").strip()
+    if texto:
+        return date.fromisoformat(texto[:10]).isoformat()
+    return date.today().isoformat()
+
+
+def chave_super_descontos(pais="BR", dia=None):
+    """Chave estável do dia. Muda só quando a data muda."""
+    return f"super_descontos:{_normalizar_pais(pais)}:{_dia_super_descontos(dia)}"
+
+
+def consultas_super_descontos(dia=None, quantidade=_SUPER_DESCONTOS_POR_DIA):
+    base = _CONSULTAS_SUPER_DESCONTOS
+    inicio = date.fromisoformat(_dia_super_descontos(dia)).toordinal() % len(base)
+    n = max(0, min(int(quantidade), len(base)))
+    return [base[(inicio + i) % len(base)] for i in range(n)]
+
+
+def _preco_anterior_confiavel(item):
+    """Só um preço anterior que a própria oferta já trouxe. Nunca inventado aqui."""
+    try:
+        atual = float((item or {}).get("preco_num") or 0)
+    except (TypeError, ValueError):
+        return None
+    if atual <= 0:
+        return None
+    for chave in ("preco_de", "preco_anterior_fonte"):
+        try:
+            antigo = float((item or {}).get(chave) or 0)
+        except (TypeError, ValueError):
+            continue
+        if antigo > atual:
+            return antigo
+    return None
+
+
+def _selo_super_desconto(item):
+    antigo = _preco_anterior_confiavel(item)
+    if not antigo:
+        return (item or {}).get("selo") or "NOVO"
+    pct = int(round((1 - float(item["preco_num"]) / antigo) * 100))
+    if pct <= 0 or pct >= 100:
+        return (item or {}).get("selo") or "NOVO"
+    return f"-{pct}%"
+
+
+def oferta_valida_super_desconto(item, consulta, pais="BR"):
+    """Oferta individual real. Rejeita catálogo, busca genérica e identidade errada."""
+    if not isinstance(item, dict):
+        return False
+    titulo = (item.get("titulo") or "").strip()
+    if not titulo:
+        return False
+    try:
+        preco = float(item.get("preco_num") or 0)
+    except (TypeError, ValueError):
+        return False
+    if preco <= 0:
+        return False
+    pais = _normalizar_pais(item.get("pais") or pais)
+    plat = item.get("plataforma") or ""
+    if plat not in _lojas_do_pais(pais):
+        return False
+    fonte = (item.get("fonte") or "").lower()
+    if fonte not in _FONTES_SUPER_DESCONTOS:
+        return False
+    url = (item.get("original_url") or item.get("url") or "").strip()
+    if not url.startswith("http"):
+        return False
+    if _url_e_google(url) or _url_e_busca_loja(url) or not _url_anuncio_exato(url, plat):
+        return False
+    if not _oferta_foto_preco_do_mesmo_item(item):
+        return False
+    if not _titulo_shopping_ok(consulta, titulo):
+        return False
+    if not _jds_anuncio_bate_consulta(consulta, titulo):
+        return False
+    return True
+
+
+def _escolher_ofertas_super(pool, pais="BR", dia=None):
+    """Uma oportunidade por consulta, a mais barata que passar na validação."""
+    escolhidas = []
+    vistas = set()
+    for consulta in consultas_super_descontos(dia):
+        candidatas = [x for x in (pool or {}).get(consulta) or [] if isinstance(x, dict)]
+        candidatas.sort(key=lambda p: float(p.get("preco_num") or 10**12))
+        for item in candidatas:
+            if not oferta_valida_super_desconto(item, consulta, pais):
+                continue
+            chave = _url_chave(item.get("original_url") or item.get("url"))
+            if chave and chave in vistas:
+                continue
+            if any(
+                _jds_mesmo_produto(outra.get("titulo"), item.get("titulo"), consulta)
+                for outra in escolhidas
+            ):
+                continue
+            marcado = dict(item)
+            marcado["termo_busca"] = consulta
+            marcado["selo"] = _selo_super_desconto(marcado)
+            escolhidas.append(marcado)
+            if chave:
+                vistas.add(chave)
+            break
+    return escolhidas
+
+
+def _conn_super_descontos():
+    conn = _conectar_cache_sqlite()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS super_descontos (
+            chave TEXT PRIMARY KEY,
+            json TEXT NOT NULL,
+            criado_em REAL NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def _ler_pacote_super(chave):
+    try:
+        with _CACHE_LOCK:
+            conn = _conn_super_descontos()
+            try:
+                row = conn.execute(
+                    "SELECT json FROM super_descontos WHERE chave = ?",
+                    (chave,),
+                ).fetchone()
+            finally:
+                conn.close()
+        if not row:
+            return None
+        pacote = json.loads(row[0])
+        return pacote if isinstance(pacote, dict) else None
+    except Exception as e:
+        print(f"[Super Descontos] leitura: {e}")
+        return None
+
+
+def _gravar_pacote_super(chave, pacote):
+    try:
+        payload = json.dumps(pacote, ensure_ascii=False)
+    except Exception as e:
+        print(f"[Super Descontos] json: {e}")
+        return
+    agora = time.time()
+    try:
+        with _CACHE_LOCK:
+            conn = _conn_super_descontos()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO super_descontos (chave, json, criado_em)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(chave) DO UPDATE SET
+                        json = excluded.json,
+                        criado_em = excluded.criado_em
+                    """,
+                    (chave, payload, agora),
+                )
+                conn.execute(
+                    "DELETE FROM super_descontos WHERE chave != ?",
+                    (chave,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception as e:
+        print(f"[Super Descontos] gravação: {e}")
+
+
+def _reidratar_super(pacote, pais="BR"):
+    """Mantém a seleção do dia. Só troca o card que deixou de ser válido."""
+    exibidas = pacote.get("exibidas") if isinstance(pacote.get("exibidas"), list) else []
+    pool = pacote.get("pool") if isinstance(pacote.get("pool"), dict) else {}
+    saida = []
+    vistas = set()
+    mudou = False
+    for item in exibidas:
+        if not isinstance(item, dict):
+            mudou = True
+            continue
+        consulta = item.get("termo_busca") or ""
+        if oferta_valida_super_desconto(item, consulta, pais):
+            saida.append(item)
+            vistas.add(_url_chave(item.get("original_url") or item.get("url")))
+            continue
+        mudou = True
+        for cand in pool.get(consulta) or []:
+            if not isinstance(cand, dict):
+                continue
+            chave = _url_chave(cand.get("original_url") or cand.get("url"))
+            if chave and chave in vistas:
+                continue
+            if not oferta_valida_super_desconto(cand, consulta, pais):
+                continue
+            if any(
+                _jds_mesmo_produto(outra.get("titulo"), cand.get("titulo"), consulta)
+                for outra in saida
+            ):
+                continue
+            marcado = dict(cand)
+            marcado["termo_busca"] = consulta
+            marcado["selo"] = _selo_super_desconto(marcado)
+            saida.append(marcado)
+            if chave:
+                vistas.add(chave)
+            break
+    return saida, mudou
+
+
+def _ofertas_super_descontos(pais="BR", dia=None, buscar=None, permitir_rede=True):
+    """Ofertas reais do dia. A mesma chave não busca de novo."""
+    pais = _normalizar_pais(pais)
+    dia_iso = _dia_super_descontos(dia)
+    chave = chave_super_descontos(pais, dia_iso)
+    pacote = _ler_pacote_super(chave)
+    if pacote is not None:
+        saida, mudou = _reidratar_super(pacote, pais)
+        if mudou:
+            pacote["exibidas"] = saida
+            _gravar_pacote_super(chave, pacote)
+        return saida
+    if not permitir_rede:
+        return []
+    fn = buscar or buscar_ofertas_jds
+    pool = {}
+    for consulta in consultas_super_descontos(dia_iso):
+        try:
+            bruto = fn(consulta, pais) or []
+        except Exception as e:
+            print(f"[Super Descontos] {consulta}: {e}")
+            bruto = []
+        pool[consulta] = [x for x in bruto if isinstance(x, dict)]
+    escolhidas = _escolher_ofertas_super(pool, pais, dia_iso)
+    _gravar_pacote_super(
+        chave,
+        {"chave": chave, "exibidas": escolhidas, "pool": pool},
+    )
+    return escolhidas
 
 
 
@@ -4429,7 +4679,6 @@ def main(page):
                 await page.launch_url(url_abrir)
             except TypeError:
                 page.launch_url(url_abrir)
-            await txt_busca.focus()
             page.update()
 
         def salvar_desejo(e):
@@ -4855,8 +5104,11 @@ def main(page):
         expand=True,
     )
 
-    preencher_grade(grade_descontos, _ofertas_super_descontos(),
-                    extra_selo="SUPER")
+    preencher_grade(
+        grade_descontos,
+        _ofertas_super_descontos(mercado["pais"], permitir_rede=False),
+        extra_selo="SUPER",
+    )
     aba_descontos = ft.Column(
         [
             ft.Text(tx("promo_jds"), color="#EDEDED"),
@@ -5027,6 +5279,15 @@ def main(page):
     )
 
     page.add(frase_sagrada, topo, abas, rodape_redes)
+
+    async def carregar_super_descontos():
+        ofertas = await asyncio.to_thread(
+            _ofertas_super_descontos, mercado["pais"],
+        )
+        preencher_grade(grade_descontos, ofertas, extra_selo="SUPER")
+        page.update()
+
+    page.run_task(carregar_super_descontos)
     page.run_task(loop_alertas_desejos)
 
 
